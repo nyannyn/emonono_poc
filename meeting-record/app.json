@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "會議記錄",
+    "slug": "meeting-record",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F3F1EC"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.example.meetingrecord",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "用於錄製會議音訊以進行轉譯",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F3F1EC"
+      },
+      "package": "com.example.meetingrecord",
+      "permissions": [
+        "RECORD_AUDIO"
+      ],
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-sqlite",
+      "expo-font",
+      "expo-audio",
+      "expo-asset"
+    ]
+  }
+}

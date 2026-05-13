@@ -1,0 +1,69 @@
+# Claude / docs
+doc/*
+.CLAUDE/*
+CLAUDE.md
+.claude/
+
+# Node / Expo
+node_modules/
+.expo/
+.expo-shared/
+dist/
+web-build/
+*.tsbuildinfo
+
+# EAS / native build artifacts
+ios/
+android/
+*.ipa
+*.apk
+*.aab
+*.keystore
+*.jks
+*.mobileprovision
+*.p8
+*.p12
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+google-services.json
+GoogleService-Info.plist
+
+# Python POC / server
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs / tmp
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.tmp/
+tmp/
+
+# Audio test artifacts
+*.wav
+*.m4a
+*.mp3
+!_design/**/*.wav
+!assets/**/*.wav
