@@ -198,6 +198,24 @@ export default function SettingsView({ navigation }: Props) {
           </>
         )}
 
+        <Text style={styles.heading}>即時字幕（Live）轉譯來源</Text>
+        <View style={styles.segment}>
+          <ModeButton
+            label="裝置端（免費/離線）"
+            active={s.liveSttSource === 'device'}
+            onPress={() => update('liveSttSource', 'device')}
+          />
+          <ModeButton
+            label="OpenAI（較準）"
+            active={s.liveSttSource === 'openai'}
+            onPress={() => update('liveSttSource', 'openai')}
+          />
+        </View>
+        <Text style={styles.note}>
+          裝置端用 iOS 內建辨識，免費、不連網、音訊不離開手機（需 dev build，Expo Go 無法用）。
+          OpenAI 較準但付費、需連網。此設定只影響「即時字幕」，整段錄音與摘要不受影響。
+        </Text>
+
         <Text style={styles.heading}>共用</Text>
         <Field
           label="語言"

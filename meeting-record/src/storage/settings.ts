@@ -24,6 +24,9 @@ export interface Settings {
   password: string;
   model: string;
 
+  // Live 即時字幕的轉譯來源：'device' = iOS 裝置端（免費/離線）；'openai' = 雲端（較準）
+  liveSttSource: 'device' | 'openai';
+
   // 共用
   language: 'zh' | 'en' | 'auto';
 
@@ -44,6 +47,7 @@ export const DEFAULT_SETTINGS: Settings = {
   username: '',
   password: '',
   model: 'gpt-oss',
+  liveSttSource: 'device',
   language: 'zh',
   lastSpeakerMapping: {},
 };

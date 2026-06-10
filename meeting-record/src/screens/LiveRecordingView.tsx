@@ -13,6 +13,7 @@ import { LLMClient } from '../llm/client';
 import { createMeeting } from '../storage/db';
 import { loadSettings, Settings } from '../storage/settings';
 import { concatWavs } from '../audio/voiceprintMix';
+import { useDeviceLiveTranscription } from '../audio/useDeviceLiveTranscription';
 import { Color, FontFamily, Radius } from '../theme/tokens';
 import { RootStackParamList } from '../navigation/AppNavigator';
 
@@ -99,7 +100,8 @@ const SILENCE_MS_REQUIRED = 350; // 連續靜默 → commit
 const MIN_CHUNK_MS = 2000;       // 至少 2 秒給模型上下文（短段準度差很多）
 const MAX_CHUNK_MS = 12000;
 
-export default function LiveRecordingView({ navigation }: Props) {
+// ── 雲端（OpenAI）即時字幕：原本的 chunk + silence-detect 實作，準度較高、付費 ──
+function OpenAiLiveView({ navigation }: Props) {
   const WAV_OPTIONS = {
     ...RecordingPresets.LOW_QUALITY,
     extension: '.wav',
@@ -512,6 +514,166 @@ export default function LiveRecordingView({ navigation }: Props) {
       </View>
     </View>
   );
+}
+
+// ── 裝置端（Apple Speech / Android on-device）即時字幕：免費、離線、音訊不離開手機 ──
+function DeviceLiveView({ navigation }: Props) {
+  const stt = useDeviceLiveTranscription();
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [elapsed, setElapsed] = useState(0);
+  const [info, setInfo] = useState('');
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const langRef = useRef<'zh' | 'en' | 'auto'>('zh');
+  const scrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => () => {
+    if (tickRef.current) clearInterval(tickRef.current);
+    deactivateKeepAwake(KEEP_AWAKE_TAG);
+    try { stt.stop(); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
+  }, [stt.lines, stt.partial]);
+
+  const onStart = async () => {
+    try {
+      const s = await loadSettings();
+      langRef.current = s.language;
+      stt.reset();
+      await stt.start(s.language === 'auto' ? 'zh' : s.language);
+      await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+      startTimeRef.current = Date.now();
+      setElapsed(0);
+      setPhase('recording');
+      tickRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+    } catch (e: any) {
+      setError2(`啟動失敗：${e.message ?? e}`);
+    }
+  };
+
+  const [error, setError] = useState('');
+  const setError2 = (m: string) => { setError(m); setPhase('error'); };
+
+  const onStop = async () => {
+    if (tickRef.current) clearInterval(tickRef.current);
+    tickRef.current = null;
+    deactivateKeepAwake(KEEP_AWAKE_TAG);
+    setPhase('finalizing');
+    stt.stop();
+    // 等末段定稿 + audioend 落地
+    await new Promise((r) => setTimeout(r, 800));
+
+    const fullText = [...stt.lines, stt.partial].filter((t) => t && t.trim()).join('\n');
+
+    // 把裝置端持久化的多段音檔 concat 成一個（失敗就不存音檔，transcript 仍保留）
+    let finalAudioPath: string | null = null;
+    const uris = stt.audioUris.filter(Boolean);
+    if (uris.length > 0) {
+      try {
+        setInfo(`合併 ${uris.length} 段音檔中…`);
+        const combined = await concatWavs(uris);
+        const dir = new Directory(Paths.document, 'recordings');
+        if (!dir.exists) dir.create({ intermediates: true });
+        const dest = new File(dir, `live_device_${startTimeRef.current}.wav`);
+        new File(combined).move(dest);
+        finalAudioPath = dest.uri;
+      } catch {
+        finalAudioPath = uris.length === 1 ? uris[0] : null;
+      }
+    }
+
+    try {
+      const id = await createMeeting({
+        title: '',
+        started_at: startTimeRef.current,
+        duration_sec: elapsed,
+        audio_path: finalAudioPath,
+        transcript: fullText,
+        notes: null,
+        mode: 'openai', // 摘要仍走 LLM；STT 來源與此無關
+      });
+      setPhase('done');
+      navigation.replace('Notes', { meetingId: id });
+    } catch (e: any) {
+      setError2(`結束失敗：${e.message ?? e}`);
+    }
+  };
+
+  const fmt = (s: number) =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+  return (
+    <View style={styles.root}>
+      <View style={styles.masthead}>
+        <Pressable onPress={() => (phase === 'recording' ? onStop() : navigation.goBack())} hitSlop={10}>
+          <Text style={styles.mastheadText}>{phase === 'recording' ? '■ 結束' : '← 返回'}</Text>
+        </Pressable>
+        <Text style={styles.mastheadText}>
+          {phase === 'recording' ? `裝置端 · ${fmt(elapsed)}`
+            : phase === 'finalizing' ? '收尾…'
+            : '即時字幕（離線）'}
+        </Text>
+      </View>
+
+      <ScrollView ref={scrollRef} style={styles.body} contentContainerStyle={styles.bodyInner}>
+        {phase === 'idle' && (
+          <Text style={styles.placeholder}>
+            按下方圓鈕開始。語音在手機本機即時轉文字，免費、不連網、音訊不離開裝置。
+            {'\n\n'}（此模式需 dev build，Expo Go 無法使用。）
+          </Text>
+        )}
+        {(phase === 'recording' || phase === 'finalizing') && stt.lines.length === 0 && !stt.partial && (
+          <Text style={styles.placeholder}>等你開口…</Text>
+        )}
+        {stt.lines.map((line, i) => (
+          <Text key={i} style={styles.line}>{line}</Text>
+        ))}
+        {!!stt.partial && <Text style={[styles.line, { color: Color.inkMuted }]}>{stt.partial}</Text>}
+        {!!info && <Text style={styles.pending}>{info}</Text>}
+        {!!stt.error && phase === 'recording' && <Text style={styles.pending}>{stt.error}</Text>}
+        {phase === 'error' && <Text style={styles.error}>{error}</Text>}
+      </ScrollView>
+
+      <View style={styles.bottom}>
+        {phase === 'idle' && (
+          <Pressable style={styles.recButton} onPress={onStart}>
+            <Feather name="mic" size={28} color={Color.paper} />
+          </Pressable>
+        )}
+        {phase === 'recording' && (
+          <Pressable style={styles.recButton} onPress={onStop}>
+            <View style={styles.stopSquare} />
+          </Pressable>
+        )}
+        {phase === 'finalizing' && (
+          <View style={[styles.recButton, { opacity: 0.5 }]}>
+            <Feather name="loader" size={28} color={Color.paper} />
+          </View>
+        )}
+        {phase === 'error' && (
+          <Pressable
+            style={({ pressed }) => [styles.outlineButton, pressed && { opacity: 0.6 }]}
+            onPress={() => { setPhase('idle'); setError(''); }}
+          >
+            <Text style={styles.outlineLabel}>重試</Text>
+          </Pressable>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// 依設定挑「裝置端（免費/離線）」或「OpenAI（較準）」
+export default function LiveRecordingView(props: Props) {
+  const [source, setSource] = useState<'device' | 'openai' | null>(null);
+  useEffect(() => {
+    loadSettings().then((s) => setSource(s.liveSttSource));
+  }, []);
+  if (source === null) return <View style={styles.root} />;
+  return source === 'device' ? <DeviceLiveView {...props} /> : <OpenAiLiveView {...props} />;
 }
 
 const styles = StyleSheet.create({
