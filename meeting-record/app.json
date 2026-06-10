@@ -1,12 +1,15 @@
 {
   "expo": {
-    "name": "會議記錄",
+    "name": "Speech-to-Text：AI 語音轉錄",
     "slug": "meeting-record",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,10 +17,12 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.example.meetingrecord",
+      "bundleIdentifier": "com.ella.meetingrecord",
+      "buildNumber": "1",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "用於錄製會議音訊以進行轉譯",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSMicrophoneUsageDescription": "用於錄製會議音訊以進行 AI 語音轉譯",
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSPrivacyAccessedAPITypes": []
       }
     },
     "android": {
@@ -25,7 +30,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#F3F1EC"
       },
-      "package": "com.example.meetingrecord",
+      "package": "com.ella.meetingrecord",
       "permissions": [
         "RECORD_AUDIO"
       ],

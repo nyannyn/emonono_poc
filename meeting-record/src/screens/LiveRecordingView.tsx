@@ -292,7 +292,7 @@ export default function LiveRecordingView({ navigation }: Props) {
   const onStart = async () => {
     setError('');
     const s = await loadSettings();
-    if (!s.openaiApiKey) {
+    if (s.keySource !== 'managed' && !s.openaiApiKey) {
       setError('請先到設定填 OpenAI API Key');
       setPhase('error');
       return;

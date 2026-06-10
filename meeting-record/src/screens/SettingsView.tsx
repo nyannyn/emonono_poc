@@ -25,6 +25,7 @@ import {
 } from '../storage/settings';
 import { deleteAllMeetings } from '../storage/db';
 import { RootStackParamList } from '../navigation/AppNavigator';
+import { FEATURES, HAS_MANAGED_PROXY, MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -37,9 +38,14 @@ export default function SettingsView({ navigation }: Props) {
   const testConnection = async () => {
     setTesting('running');
     setTestMsg('');
+    const managed = s.keySource === 'managed';
     try {
-      const res = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${s.openaiApiKey}` },
+      const url = managed
+        ? `${MANAGED_PROXY_URL}/v1/models`
+        : 'https://api.openai.com/v1/models';
+      const token = managed ? MANAGED_PROXY_TOKEN : s.openaiApiKey;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
         setTesting('fail');
@@ -57,7 +63,8 @@ export default function SettingsView({ navigation }: Props) {
 
   useEffect(() => {
     loadSettings().then((v) => {
-      setS(v);
+      // 公開版沒有本地 Ollama，強制走 OpenAI，避免讀到舊的 'local' 值卡住
+      setS(FEATURES.localOllamaMode ? v : { ...v, mode: 'openai' });
       setLoaded(true);
     });
   }, []);
@@ -85,18 +92,36 @@ export default function SettingsView({ navigation }: Props) {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        {/* OpenAI Key — STT 用，必填 */}
-        <Text style={styles.heading}>OpenAI（STT 必填）</Text>
-        <Text style={styles.note}>
-          逐字稿一律走 OpenAI Whisper（部門 Ollama 端點沒 STT）
-        </Text>
-        <Field
-          label="API Key"
-          value={s.openaiApiKey}
-          onChangeText={(v) => update('openaiApiKey', v)}
-          placeholder="sk-..."
-          secureTextEntry
-        />
+        {/* key 來源：內建額度 vs 自己的 key。只有設好 proxy 才給選 */}
+        <Text style={styles.heading}>轉錄服務</Text>
+        {HAS_MANAGED_PROXY && (
+          <>
+            <View style={styles.segment}>
+              <ModeButton
+                label="內建（免設定）"
+                active={s.keySource === 'managed'}
+                onPress={() => update('keySource', 'managed')}
+              />
+              <ModeButton
+                label="自己的 API Key"
+                active={s.keySource === 'own'}
+                onPress={() => update('keySource', 'own')}
+              />
+            </View>
+            <Text style={styles.note}>
+              「內建」用 app 提供的額度，免填 key；「自己的 API Key」直接走你自己的 OpenAI 帳號。
+            </Text>
+          </>
+        )}
+        {s.keySource !== 'managed' && (
+          <Field
+            label="OpenAI API Key"
+            value={s.openaiApiKey}
+            onChangeText={(v) => update('openaiApiKey', v)}
+            placeholder="sk-..."
+            secureTextEntry
+          />
+        )}
         <Field
           label="Whisper 模型"
           value={s.openaiTranscriptionModel}
@@ -110,7 +135,7 @@ export default function SettingsView({ navigation }: Props) {
         <Pressable
           style={({ pressed }) => [styles.testButton, pressed && { opacity: 0.7 }]}
           onPress={() => {
-            if (!s.openaiApiKey) {
+            if (s.keySource !== 'managed' && !s.openaiApiKey) {
               setTesting('fail');
               setTestMsg('請先填 API Key');
               return;
@@ -128,14 +153,16 @@ export default function SettingsView({ navigation }: Props) {
           </Text>
         )}
 
-        {/* LLM 模式選擇 */}
+        {/* LLM 模式選擇 — 公開版只露 OpenAI 雲端 */}
         <Text style={styles.heading}>LLM 來源（會議記錄整理）</Text>
-        <View style={styles.segment}>
-          <ModeButton label="OpenAI GPT" active={s.mode === 'openai'} onPress={() => update('mode', 'openai')} />
-          <ModeButton label="本地 Ollama" active={s.mode === 'local'} onPress={() => update('mode', 'local')} />
-        </View>
+        {FEATURES.localOllamaMode && (
+          <View style={styles.segment}>
+            <ModeButton label="OpenAI GPT" active={s.mode === 'openai'} onPress={() => update('mode', 'openai')} />
+            <ModeButton label="本地 Ollama" active={s.mode === 'local'} onPress={() => update('mode', 'local')} />
+          </View>
+        )}
 
-        {s.mode === 'openai' ? (
+        {s.mode === 'openai' || !FEATURES.localOllamaMode ? (
           <Field
             label="GPT 模型"
             value={s.openaiChatModel}
@@ -191,13 +218,17 @@ export default function SettingsView({ navigation }: Props) {
           <Text style={styles.linkLabel}>管理成員（聲紋註冊）→</Text>
         </Pressable>
 
-        <Text style={styles.heading}>實驗</Text>
-        <Pressable
-          style={({ pressed }) => [styles.linkButton, pressed && { opacity: 0.6 }]}
-          onPress={() => navigation.navigate('Realtime')}
-        >
-          <Text style={styles.linkLabel}>Realtime 模式（WebSocket 串流）→</Text>
-        </Pressable>
+        {FEATURES.realtimeStreaming && (
+          <>
+            <Text style={styles.heading}>實驗</Text>
+            <Pressable
+              style={({ pressed }) => [styles.linkButton, pressed && { opacity: 0.6 }]}
+              onPress={() => navigation.navigate('Realtime')}
+            >
+              <Text style={styles.linkLabel}>Realtime 模式（WebSocket 串流）→</Text>
+            </Pressable>
+          </>
+        )}
 
         <Text style={styles.heading}>危險區</Text>
         <Pressable

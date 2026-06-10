@@ -1,0 +1,67 @@
+# 打包並上傳 TestFlight，對標 ios-voice-agent 的 CI 模式。
+# 使用 EAS Build（雲端 macOS runner）+ EAS Submit + App Store Connect API key。
+# 憑證由 EAS 自動管理，不需另開 certs repo。
+# 只手動觸發，節省 GitHub Actions 額度。
+name: TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "操作"
+        required: true
+        default: "beta"
+        type: choice
+        options:
+          - beta      # 打包 + 上傳 TestFlight
+          - build     # 只打包，不上傳
+
+jobs:
+  testflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: meeting-record/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meeting-record
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      - name: Build iOS (production)
+        working-directory: meeting-record
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          eas build \
+            --platform ios \
+            --profile production \
+            --non-interactive \
+            --no-wait
+
+      - name: Upload to TestFlight
+        if: ${{ inputs.lane == 'beta' }}
+        working-directory: meeting-record
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          eas submit \
+            --platform ios \
+            --profile production \
+            --non-interactive \
+            --latest

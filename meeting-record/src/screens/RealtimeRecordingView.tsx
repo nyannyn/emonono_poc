@@ -140,12 +140,13 @@ export default function RealtimeRecordingView({ navigation }: Props) {
     const url = `wss://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(url, undefined, {
+      // RN 的 WebSocket 支援第三個 options 參數帶 headers，但型別只宣告 1-2 個參數
+      ws = new (WebSocket as any)(url, undefined, {
         headers: {
           Authorization: `Bearer ${s.openaiApiKey}`,
           'OpenAI-Beta': 'realtime=v1',
         },
-      } as any);
+      });
     } catch (e: any) {
       setError(`WebSocket 建立失敗：${e.message ?? e}`);
       setPhase('error');

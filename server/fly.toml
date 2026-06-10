@@ -1,0 +1,25 @@
+# Fly.io 部署設定（managed key proxy）
+# 用法：
+#   cd server
+#   fly launch --no-deploy           # 首次：建立 app（會問 app 名稱/區域，可沿用本檔）
+#   fly secrets set OPENAI_API_KEY=sk-... APP_PROXY_TOKEN=<自訂長亂碼>
+#   fly deploy
+# 部署後網址通常是 https://<app>.fly.dev → 填進 EAS env EXPO_PUBLIC_PROXY_URL
+
+app = "emonono-proxy"
+primary_region = "nrt"   # 東京；可改 hkg/sin 等
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

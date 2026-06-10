@@ -84,7 +84,7 @@ export default function RecordingView({ navigation, route }: Props) {
   };
 
   const verifySettings = (s: Settings): string | null => {
-    if (!s.openaiApiKey) return '請先到設定填 OpenAI API Key（STT 用）';
+    if (s.keySource !== 'managed' && !s.openaiApiKey) return '請先到設定填 OpenAI API Key（STT 用）';
     if (s.mode === 'local' && (!s.llmUrl || !s.username)) {
       return '本地 Ollama 模式還需填 Ollama URL / 帳密';
     }

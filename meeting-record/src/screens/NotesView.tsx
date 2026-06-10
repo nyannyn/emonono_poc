@@ -13,6 +13,7 @@ import { loadSettings, Mode } from '../storage/settings';
 import { getMeeting, updateMeeting } from '../storage/db';
 import { Color, FontFamily, Radius } from '../theme/tokens';
 import { RootStackParamList } from '../navigation/AppNavigator';
+import { FEATURES } from '../config/features';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Notes'>;
 type Phase = 'loading' | 'generating' | 'done' | 'error';
@@ -200,13 +201,15 @@ export default function NotesView({ navigation, route }: Props) {
             >
               <Text style={styles.outlineLabel}>重新</Text>
             </Pressable>
-            <Pressable
-              style={({ pressed }) => [styles.outlineButton, pressed && { opacity: 0.6 }]}
-              onPress={onCompare}
-              disabled={altLoading}
-            >
-              <Text style={styles.outlineLabel}>{altLoading ? '比對中…' : '比對'}</Text>
-            </Pressable>
+            {FEATURES.localOllamaMode && (
+              <Pressable
+                style={({ pressed }) => [styles.outlineButton, pressed && { opacity: 0.6 }]}
+                onPress={onCompare}
+                disabled={altLoading}
+              >
+                <Text style={styles.outlineLabel}>{altLoading ? '比對中…' : '比對'}</Text>
+              </Pressable>
+            )}
             {meetingId != null && /\[speaker[_\s]?\w+\]/i.test(transcript) && (
               <Pressable
                 style={({ pressed }) => [styles.outlineButton, pressed && { opacity: 0.6 }]}

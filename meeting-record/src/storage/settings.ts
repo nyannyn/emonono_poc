@@ -3,9 +3,14 @@
 import * as SecureStore from 'expo-secure-store';
 
 export type Mode = 'openai' | 'local';
+// 'managed' = 走我們自架的 proxy（內建 key，使用者免設定）；'own' = 使用者自己的 OpenAI key
+export type KeySource = 'managed' | 'own';
 
 export interface Settings {
   mode: Mode;
+
+  // key 來源：公開版預設 managed（走 proxy）；進階使用者可改 own 用自己的 key
+  keySource: KeySource;
 
   // OpenAI 雲端
   openaiApiKey: string;
@@ -30,6 +35,7 @@ const KEY = 'app.settings.v2';
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: 'openai',
+  keySource: 'managed',
   openaiApiKey: '',
   openaiTranscriptionModel: 'gpt-4o-transcribe-diarize',
   openaiChatModel: 'gpt-4.1',

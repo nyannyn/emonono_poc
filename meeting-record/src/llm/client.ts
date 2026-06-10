@@ -3,8 +3,9 @@
 // 模型若為 gpt-4o-transcribe-diarize，會自動把 [speaker_*] 標籤嵌入文字
 
 import { File } from 'expo-file-system';
-import { Mode } from '../storage/settings';
+import { KeySource, Mode } from '../storage/settings';
 import { cleanupChunks, splitWavIfNeeded } from '../audio/wavChunker';
+import { MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
 
 export const MEETING_NOTES_PROMPT = `你是一位專業的會議記錄整理員。請根據以下會議逐字稿，整理成一份完整的繁體中文會議記錄。
 
@@ -38,6 +39,8 @@ export const SYSTEM_NOTES = '你是一位精通科技產業的專業會議記錄
 
 export interface ClientConfig {
   mode: Mode;
+  // 'managed' → 走自架 proxy（內建 key）；'own' → 使用者自己的 OpenAI key
+  keySource?: KeySource;
   // OpenAI
   openaiApiKey?: string;
   openaiTranscriptionModel?: string;
@@ -57,11 +60,25 @@ export class LLMClient {
     return u.replace(/\/$/, '');
   }
 
+  // managed 模式：對外都打自架 proxy（OpenAI 相容），auth 用 app proxy token，
+  // 真正的 OpenAI key 由 proxy 持有。否則直連 OpenAI、auth 用使用者自己的 key。
+  private get managed() {
+    return this.cfg.keySource === 'managed';
+  }
+
+  private openaiBase() {
+    return this.managed ? this.trim(MANAGED_PROXY_URL) : 'https://api.openai.com';
+  }
+
+  private openaiAuth() {
+    return `Bearer ${this.managed ? MANAGED_PROXY_TOKEN : this.cfg.openaiApiKey ?? ''}`;
+  }
+
   private llmEndpoint() {
     if (this.cfg.mode === 'openai') {
       return {
-        url: 'https://api.openai.com/v1/chat/completions',
-        auth: `Bearer ${this.cfg.openaiApiKey ?? ''}`,
+        url: `${this.openaiBase()}/v1/chat/completions`,
+        auth: this.openaiAuth(),
         model: this.cfg.openaiChatModel || 'gpt-4.1',
       };
     }
@@ -74,8 +91,8 @@ export class LLMClient {
 
   private sttEndpoint() {
     return {
-      url: 'https://api.openai.com/v1/audio/transcriptions',
-      auth: `Bearer ${this.cfg.openaiApiKey ?? ''}`,
+      url: `${this.openaiBase()}/v1/audio/transcriptions`,
+      auth: this.openaiAuth(),
       model: this.cfg.openaiTranscriptionModel || 'whisper-1',
     };
   }
