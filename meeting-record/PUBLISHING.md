@@ -116,8 +116,28 @@ fly deploy
 eas env:create --name EXPO_PUBLIC_PROXY_URL   --value https://你的proxy.fly.dev --environment production --environment preview
 eas env:create --name EXPO_PUBLIC_PROXY_TOKEN --value <同一串長亂碼> --environment production --environment preview --type secret
 ```
-⚠️ app token 可被反編譯取得，不是強安全邊界；proxy 已內建每 IP 速率限制當第一道門檻，
-正式營運建議再加用量上限 / 每裝置額度。
+⚠️ app token 可被反編譯取得，不是強安全邊界。proxy（`server/openai_proxy.py`）已內建三道閘：
+模型白名單（只放行 app 用的模型）、per-IP + per-token 滑動視窗限流、per-token 每日配額。
+可用環境變數調整：`ALLOWED_MODELS`、`RATE_MAX`、`TOKEN_RATE_MAX`、`DAILY_QUOTA`、`QUOTA_FILE`。
+Fly.io 上 `QUOTA_FILE` 預設寫 `/tmp`，重啟會清；要跨重啟保留請掛 Fly volume 指到該路徑。
+
+---
+
+## App 隱私 / 資料揭露（送審必填）
+
+App Store 正式審核會要求「App 隱私」表單與隱私政策 URL。本 app 的資料流：
+
+| 項目 | 說明 |
+|---|---|
+| **隱私政策 URL** | **必填**（你本人上線一頁靜態頁即可）。需說明：錄音音訊會上傳 OpenAI 做轉譯與摘要；不販售個資。 |
+| **音訊** | 雲端模式：音訊上傳 OpenAI（內建 proxy 或使用者自備 key）做 STT / 摘要。裝置端 Live 模式：音訊不離開手機。 |
+| **逐字稿 / 會議記錄** | 僅存本機 SQLite（`meetings.db`），不上雲、不同步。 |
+| **API key / 帳密** | 存 iOS Keychain（expo-secure-store），不離開裝置。 |
+| **追蹤** | 無第三方分析、無廣告 SDK、不做跨 app 追蹤 → App Privacy 選「Data Not Collected」對應項。 |
+| **required-reason API** | 已在 `app.json` 的 `ios.privacyManifests` 宣告：FileTimestamp(C617.1)、UserDefaults(CA92.1)、DiskSpace(E174.1)。 |
+
+App Store Connect →「App 隱私」表單對應勾選：音訊歸在「使用者內容（Audio Data）」，
+用途為「App 功能（轉錄）」，不連結身分、不追蹤。
 
 ---
 

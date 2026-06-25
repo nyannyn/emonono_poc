@@ -22,9 +22,24 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "用於錄製會議音訊以進行即時字幕",
         "ITSAppUsesNonExemptEncryption": false,
-        "NSPrivacyAccessedAPITypes": [],
         "NSSpeechRecognitionUsageDescription": "用於將你的語音即時轉成文字（裝置端辨識，不離開手機）",
         "UIBackgroundModes": ["audio"]
+      },
+      "privacyManifests": {
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": ["E174.1"]
+          }
+        ]
       }
     },
     "android": {
