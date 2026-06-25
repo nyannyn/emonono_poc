@@ -6,6 +6,11 @@ import { File } from 'expo-file-system';
 import { KeySource, Mode } from '../storage/settings';
 import { cleanupChunks, splitWavIfNeeded } from '../audio/wavChunker';
 import { MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
+import { fetchWithTimeout, parseJsonSafe } from './http';
+
+// 各類請求逾時：STT 上傳較久、chat 中等
+const STT_TIMEOUT_MS = 300000; // 5 分鐘（大檔上傳 + 轉譯）
+const CHAT_TIMEOUT_MS = 120000; // 2 分鐘
 
 export const MEETING_NOTES_PROMPT = `你是一位專業的會議記錄整理員。請根據以下會議逐字稿，整理成一份完整的繁體中文會議記錄。
 
@@ -164,7 +169,7 @@ export class LLMClient {
     };
 
     const post = async (form: FormData) =>
-      fetch(ep.url, { method: 'POST', headers: { Authorization: ep.auth }, body: form });
+      fetchWithTimeout(ep.url, { method: 'POST', headers: { Authorization: ep.auth }, body: form }, STT_TIMEOUT_MS);
 
     // diarize 模型先試 diarized_json；不支援就退回 json
     if (isDiarize) {
@@ -178,21 +183,21 @@ export class LLMClient {
           throw new Error(`STT ${res.status}: ${errText}`);
         }
       }
-      return formatTranscript(await res.json());
+      return formatTranscript(await parseJsonSafe(res, 'STT 回應'));
     }
 
     // whisper-1 用 verbose_json 拿 segments；其它（gpt-4o-transcribe 等）只能 json
     const fmt = isLegacyWhisper ? 'verbose_json' : 'json';
     const res = await post(buildForm(fmt));
     if (!res.ok) throw new Error(`STT ${res.status}: ${await res.text()}`);
-    return formatTranscript(await res.json());
+    return formatTranscript(await parseJsonSafe(res, 'STT 回應'));
   }
 
   async generateMeetingNotes(transcript: string): Promise<{ text: string; usage: TokenUsage }> {
     const ep = this.llmEndpoint();
     const prompt = MEETING_NOTES_PROMPT.replace('{transcript}', transcript);
     const t0 = Date.now();
-    const res = await fetch(ep.url, {
+    const res = await fetchWithTimeout(ep.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -207,9 +212,9 @@ export class LLMClient {
         temperature: 0.3,
         max_tokens: 4000,
       }),
-    });
+    }, CHAT_TIMEOUT_MS);
     if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`);
-    const data = await res.json();
+    const data = await parseJsonSafe(res, 'LLM 回應');
     const u = data?.usage ?? {};
     const input = u.prompt_tokens ?? u.input_tokens ?? 0;
     const output = u.completion_tokens ?? u.output_tokens ?? 0;
@@ -253,9 +258,9 @@ function formatTranscript(data: any): string {
     return out.join('').trim();
   }
 
-  // Case 2: segments 沒 speaker → 純 concat
+  // Case 2: segments 沒 speaker → 純 concat（用空白接，避免句子黏在一起）
   if (segments.length) {
-    return segments.map((s) => (s.text ?? '').toString()).join('').trim();
+    return segments.map((s) => (s.text ?? '').toString().trim()).filter(Boolean).join(' ').trim();
   }
 
   // Case 3: 只有 text。diarize 模型 + json 通常會把講者標在文字裡
