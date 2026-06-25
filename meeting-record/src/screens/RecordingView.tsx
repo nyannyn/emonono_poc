@@ -1,14 +1,14 @@
 // RecordingView — 整段錄完才送 + 可選與會者拼前置聲紋讓 Whisper 自動配對講者
 
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { AudioModule, IOSOutputFormat, RecordingPresets, useAudioRecorder } from 'expo-audio';
 import { Directory, File, Paths } from 'expo-file-system';
 import { LLMClient } from '../llm/client';
-import { createMeeting, listMembers, Member } from '../storage/db';
+import { createMeeting, getMeeting, listMembers, Member, updateMeeting } from '../storage/db';
 import { loadSettings, Settings } from '../storage/settings';
 import { autoMapSpeakers, prependVoiceprints } from '../audio/voiceprintMix';
 import { Color, FontFamily, Radius } from '../theme/tokens';
@@ -56,10 +56,23 @@ export default function RecordingView({ navigation, route }: Props) {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [mappedSummary, setMappedSummary] = useState('');
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 進背景自動停止並保存（Expo Go 背景錄音本就無效，避免靜默掉錄音）
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const onStopRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'background' && phaseRef.current === 'recording') onStopRef.current();
+    });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     const uri = route.params?.uploadedFileUri;
+    const retryId = route.params?.retryMeetingId;
     if (uri) handleIncomingFile(uri);
+    else if (retryId != null) retryTranscribe(retryId);
     return () => {
       if (tickRef.current) clearInterval(tickRef.current);
       deactivateKeepAwake(KEEP_AWAKE_TAG);
@@ -67,20 +80,49 @@ export default function RecordingView({ navigation, route }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 上傳檔案：WAV 且有成員 → attendees phase；否則直接轉譯 */
+  /** 上傳檔案：先持久化＋建「待轉譯」紀錄。WAV 且有成員 → attendees phase；否則直接轉譯 */
   const handleIncomingFile = async (uri: string) => {
-    const isWav = uri.toLowerCase().endsWith('.wav');
-    if (isWav) {
-      const ms = await listMembers();
-      if (ms.length > 0) {
-        setRecordedPath(uri);
-        setMembers(ms);
-        setSelectedIds(new Set());
-        setPhase('attendees');
+    try {
+      const path = moveToRecordings(uri);
+      const id = await createMeeting({
+        title: '', started_at: Date.now(), duration_sec: null,
+        audio_path: path, transcript: null, notes: null, mode: null,
+      });
+      setMeetingId(id);
+      setRecordedPath(path);
+      const isWav = path.toLowerCase().endsWith('.wav');
+      if (isWav) {
+        const ms = await listMembers();
+        if (ms.length > 0) {
+          setMembers(ms);
+          setSelectedIds(new Set());
+          setPhase('attendees');
+          return;
+        }
+      }
+      await runTranscribe(id, path, []);
+    } catch (e: any) {
+      setError(`匯入失敗：${e.message ?? e}`);
+      setPhase('error');
+    }
+  };
+
+  /** 從歷史的「待轉譯」列重新轉譯：取回音檔路徑後重跑。 */
+  const retryTranscribe = async (id: number) => {
+    try {
+      const m = await getMeeting(id);
+      if (!m || !m.audio_path) {
+        setError('找不到原始音檔，無法重新轉譯');
+        setPhase('error');
         return;
       }
+      setMeetingId(id);
+      setRecordedPath(m.audio_path);
+      await runTranscribe(id, m.audio_path, []);
+    } catch (e: any) {
+      setError(`重新轉譯失敗：${e.message ?? e}`);
+      setPhase('error');
     }
-    transcribeFile(uri);
   };
 
   const verifySettings = (s: Settings): string | null => {
@@ -113,37 +155,6 @@ export default function RecordingView({ navigation, route }: Props) {
       return `音檔 ${mb.toFixed(1)} MB 超過 OpenAI 25MB 上限，且非 WAV 格式無法在 app 內自動切段。\n請改用 poc/transcribe_and_summarize.py（Python 端有 ffmpeg）。`;
     }
     return null;
-  };
-
-  /** 上傳音檔流程：直接轉譯（沒走聲紋對應）。 */
-  const transcribeFile = async (fileUri: string) => {
-    setError('');
-    setPhase('transcribing');
-    const s = await loadSettings();
-    const issue = verifySettings(s);
-    if (issue) { setError(issue); setPhase('error'); return; }
-    const sizeIssue = checkUploadSize(fileUri);
-    if (sizeIssue) { setError(sizeIssue); setPhase('error'); return; }
-    try {
-      const client = new LLMClient(s);
-      const lang = s.language === 'auto' ? undefined : s.language;
-      setChunkProg(null);
-      const text = await client.transcribe(fileUri, {
-        language: lang,
-        prompt: '以下是一段繁體中文（台灣用語）的會議錄音逐字稿，可能夾雜少量英文技術名詞。',
-        onProgress: (done, total) => total > 1 && setChunkProg({ done, total }),
-      });
-      setTranscript(text);
-      const id = await createMeeting({
-        title: '', started_at: Date.now(), duration_sec: null,
-        audio_path: fileUri, transcript: text, notes: null, mode: s.mode,
-      });
-      setMeetingId(id);
-      setPhase('done');
-    } catch (e: any) {
-      setError(`轉譯失敗：${e.message ?? e}`);
-      setPhase('error');
-    }
   };
 
   const onStart = async () => {
@@ -180,11 +191,17 @@ export default function RecordingView({ navigation, route }: Props) {
       if (!sourceUri) throw new Error('No URI from recorder');
       const path = moveToRecordings(sourceUri);
       setRecordedPath(path);
+      // 音檔一落地就建「待轉譯」紀錄，轉譯崩潰也不會掉錄音
+      const id = await createMeeting({
+        title: '', started_at: Date.now(), duration_sec: elapsed || null,
+        audio_path: path, transcript: null, notes: null, mode: null,
+      });
+      setMeetingId(id);
       const ms = await listMembers();
       setMembers(ms);
       setSelectedIds(new Set());
       if (ms.length === 0) {
-        await runTranscribe(path, []);
+        await runTranscribe(id, path, []);
       } else {
         setPhase('attendees');
       }
@@ -194,13 +211,15 @@ export default function RecordingView({ navigation, route }: Props) {
     }
   };
 
+  onStopRef.current = onStop;
+
   const onConfirmAttendees = async () => {
-    if (!recordedPath) return;
+    if (!recordedPath || meetingId == null) return;
     const selected = members.filter((m) => selectedIds.has(m.id));
-    await runTranscribe(recordedPath, selected);
+    await runTranscribe(meetingId, recordedPath, selected);
   };
 
-  const runTranscribe = async (path: string, selected: Member[]) => {
+  const runTranscribe = async (id: number, path: string, selected: Member[]) => {
     setPhase('transcribing');
     setMappedSummary('');
     try {
@@ -238,14 +257,13 @@ export default function RecordingView({ navigation, route }: Props) {
       }
 
       setTranscript(text);
-      const id = await createMeeting({
-        title: '', started_at: Date.now(), duration_sec: elapsed || null,
-        audio_path: path, transcript: text, notes: null, mode: s.mode,
+      await updateMeeting(id, {
+        transcript: text, duration_sec: elapsed || null, mode: s.mode,
       });
       setMeetingId(id);
       setPhase('done');
     } catch (e: any) {
-      setError(`轉譯失敗：${e.message ?? e}`);
+      setError(`轉譯失敗：${e.message ?? e}（錄音已保存，可在歷史重新轉譯）`);
       setPhase('error');
     }
   };

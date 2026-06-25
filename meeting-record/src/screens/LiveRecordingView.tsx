@@ -3,7 +3,7 @@
 // caveat: expo-audio 沒提供連續 streaming，stop/restart 之間會有 ~200-500ms 空檔
 
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -157,6 +157,17 @@ function OpenAiLiveView({ navigation }: Props) {
   const lastTextRef = useRef<string>('');   // 上一段文字，用於偵測迴圈幻覺
 
   useEffect(() => () => cleanup(), []);
+
+  // 進背景自動結束並保存目前片段
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const onStopRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'background' && phaseRef.current === 'recording') onStopRef.current();
+    });
+    return () => sub.remove();
+  }, []);
 
   // Silence detection — 以 metering 變化驅動切段
   useEffect(() => {
@@ -345,6 +356,8 @@ function OpenAiLiveView({ navigation }: Props) {
       setPhase('error');
     }
   };
+
+  onStopRef.current = () => { onStop(); };
 
   const onStop = async () => {
     if (tickRef.current) clearInterval(tickRef.current);
@@ -538,6 +551,17 @@ function DeviceLiveView({ navigation }: Props) {
     requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
   }, [stt.lines, stt.partial]);
 
+  // 進背景自動結束並保存目前片段
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const onStopRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'background' && phaseRef.current === 'recording') onStopRef.current();
+    });
+    return () => sub.remove();
+  }, []);
+
   const onStart = async () => {
     try {
       const s = await loadSettings();
@@ -556,6 +580,8 @@ function DeviceLiveView({ navigation }: Props) {
 
   const [error, setError] = useState('');
   const setError2 = (m: string) => { setError(m); setPhase('error'); };
+
+  onStopRef.current = () => { onStop(); };
 
   const onStop = async () => {
     if (tickRef.current) clearInterval(tickRef.current);
