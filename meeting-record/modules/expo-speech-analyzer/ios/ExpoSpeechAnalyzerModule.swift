@@ -40,6 +40,7 @@ public class ExpoSpeechAnalyzerModule: Module {
         }
 
         AsyncFunction("stop") { () async in
+            guard #available(iOS 26.0, *) else { return }
             await self.stopAnalyzer()
         }
 
