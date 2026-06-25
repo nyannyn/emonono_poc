@@ -585,6 +585,15 @@ function DeviceLiveView({ navigation }: Props) {
       }
     }
 
+    // 逐句時間戳（僅 SpeechAnalyzer 引擎會給）→ 存 segments 供 NotesView 點字幕跳播。
+    // 任一句有秒數才存；全 null（如 expo fallback）就存 null，NotesView 自動退回純文字。
+    const finalLines = stt.lines.filter((t) => t && t.trim());
+    const finalTimes = stt.timestamps.slice(0, finalLines.length);
+    const hasAnyTime = finalTimes.some((t) => typeof t === 'number');
+    const segments = hasAnyTime
+      ? JSON.stringify(finalLines.map((text, i) => ({ t: finalTimes[i] ?? null, text })))
+      : null;
+
     try {
       const id = await createMeeting({
         title: '',
@@ -594,6 +603,7 @@ function DeviceLiveView({ navigation }: Props) {
         transcript: fullText,
         notes: null,
         mode: 'openai', // 摘要仍走 LLM；STT 來源與此無關
+        segments,
       });
       setPhase('done');
       navigation.replace('Notes', { meetingId: id });

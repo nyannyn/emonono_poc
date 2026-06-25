@@ -6,11 +6,12 @@ import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { AudioPlayer } from 'expo-audio';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { SimpleMarkdown } from '../components/SimpleMarkdown';
 import { LLMClient, TokenUsage } from '../llm/client';
 import { loadSettings, Mode } from '../storage/settings';
-import { getMeeting, updateMeeting } from '../storage/db';
+import { getMeeting, updateMeeting, TranscriptSegment } from '../storage/db';
 import { Color, FontFamily, Radius } from '../theme/tokens';
 import { RootStackParamList } from '../navigation/AppNavigator';
 import { FEATURES } from '../config/features';
@@ -26,7 +27,21 @@ export default function NotesView({ navigation, route }: Props) {
   const [title, setTitle] = useState('');
   const [error, setError] = useState('');
   const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
   const [usage, setUsage] = useState<TokenUsage | null>(null);
+
+  // 播放器提升到此層，讓「點逐字稿跳播」與下方播放列共用同一個 player。
+  const player = useAudioPlayer(audioPath ?? undefined);
+
+  const seekAndPlay = (t: number | null) => {
+    if (t == null || !audioPath) return;
+    try {
+      player.seekTo(Math.max(0, t));
+      player.play();
+    } catch {
+      // ignore
+    }
+  };
   // 比對另一個 LLM
   const [altMode, setAltMode] = useState<Mode | null>(null);
   const [altNotes, setAltNotes] = useState('');
@@ -48,6 +63,12 @@ export default function NotesView({ navigation, route }: Props) {
         setTranscript(trans);
         setTitle(m.title ?? '');
         setAudioPath(m.audio_path ?? null);
+        if (m.segments) {
+          try {
+            const parsed = JSON.parse(m.segments) as TranscriptSegment[];
+            if (Array.isArray(parsed) && parsed.length) setSegments(parsed);
+          } catch {}
+        }
         if (m.notes) {
           setNotes(m.notes);
           setPhase('done');
@@ -161,7 +182,7 @@ export default function NotesView({ navigation, route }: Props) {
               />
             )}
             {!!audioPath ? (
-              <AudioPlayerControl uri={audioPath} />
+              <AudioPlayerControl uri={audioPath} player={player} />
             ) : (
               meetingId != null && (
                 <Text style={styles.audioMissing}>（這筆會議沒有音檔，可能合併失敗或上傳模式無音檔）</Text>
@@ -182,11 +203,18 @@ export default function NotesView({ navigation, route }: Props) {
                 {!altLoading && !!altNotes && <SimpleMarkdown source={altNotes} />}
               </>
             )}
-            {!!transcript && (
+            {segments && !!audioPath ? (
               <>
-                <Text style={styles.divider}>— 原始逐字稿 —</Text>
-                <SimpleMarkdown source={transcript} />
+                <Text style={styles.divider}>— 原始逐字稿（點句子跳播）—</Text>
+                <SeekableTranscript segments={segments} onSeek={seekAndPlay} />
               </>
+            ) : (
+              !!transcript && (
+                <>
+                  <Text style={styles.divider}>— 原始逐字稿 —</Text>
+                  <SimpleMarkdown source={transcript} />
+                </>
+              )
             )}
           </View>
         )}
@@ -260,8 +288,7 @@ const usageStyles = StyleSheet.create({
   },
 });
 
-function AudioPlayerControl({ uri }: { uri: string }) {
-  const player = useAudioPlayer(uri);
+function AudioPlayerControl({ uri, player }: { uri: string; player: AudioPlayer }) {
   const status = useAudioPlayerStatus(player);
 
   const fmt = (sec: number) => {
@@ -335,6 +362,51 @@ const audioStyles = StyleSheet.create({
     color: Color.inkMuted,
     textTransform: 'uppercase',
   },
+});
+
+/** 逐句可點跳播的逐字稿（裝置端 SpeechAnalyzer 引擎附時間戳時才會用到）。 */
+function SeekableTranscript({
+  segments,
+  onSeek,
+}: {
+  segments: TranscriptSegment[];
+  onSeek: (t: number | null) => void;
+}) {
+  const fmtClock = (t: number | null) => {
+    if (t == null) return '';
+    const s = Math.max(0, Math.floor(t));
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  return (
+    <View>
+      {segments.map((seg, i) => {
+        const seekable = typeof seg.t === 'number';
+        return (
+          <Pressable
+            key={i}
+            disabled={!seekable}
+            onPress={() => onSeek(seg.t)}
+            style={({ pressed }) => [seekStyles.row, pressed && seekable && { opacity: 0.55 }]}
+          >
+            {seekable && <Text style={seekStyles.time}>{fmtClock(seg.t)}</Text>}
+            <Text style={seekStyles.text}>{seg.text}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+const seekStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'baseline', gap: 10, paddingVertical: 3 },
+  time: {
+    fontFamily: FontFamily.mono,
+    fontSize: 10,
+    letterSpacing: 0.5,
+    color: Color.inkFaint,
+    minWidth: 34,
+  },
+  text: { flex: 1, fontSize: 13, color: Color.inkMuted, lineHeight: 21 },
 });
 
 const styles = StyleSheet.create({

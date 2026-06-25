@@ -11,6 +11,15 @@ export interface Meeting {
   transcript: string | null;
   notes: string | null;
   mode: string | null;      // 'openai' | 'local'
+  /** JSON `[{ t: number|null, text: string }]`：逐句起始秒數，供 NotesView 點字幕跳播。null=無時間戳。 */
+  segments: string | null;
+}
+
+/** 逐句時間戳片段（segments 欄反序列化後）。 */
+export interface TranscriptSegment {
+  /** 相對音檔起點的秒數；引擎未提供則 null。 */
+  t: number | null;
+  text: string;
 }
 
 let _db: SQLite.SQLiteDatabase | null = null;
@@ -27,7 +36,8 @@ async function db(): Promise<SQLite.SQLiteDatabase> {
       audio_path TEXT,
       transcript TEXT,
       notes TEXT,
-      mode TEXT
+      mode TEXT,
+      segments TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at DESC);
     CREATE TABLE IF NOT EXISTS members (
@@ -37,6 +47,10 @@ async function db(): Promise<SQLite.SQLiteDatabase> {
       created_at INTEGER NOT NULL
     );
   `);
+  // 既有安裝補上 segments 欄（欄已存在會 throw，吞掉即可）。
+  try {
+    await _db.execAsync(`ALTER TABLE meetings ADD COLUMN segments TEXT`);
+  } catch {}
   return _db;
 }
 
@@ -74,11 +88,13 @@ export async function countMembers(): Promise<number> {
   return r?.n ?? 0;
 }
 
-export async function createMeeting(input: Omit<Meeting, 'id'>): Promise<number> {
+export async function createMeeting(
+  input: Omit<Meeting, 'id' | 'segments'> & { segments?: string | null },
+): Promise<number> {
   const d = await db();
   const r = await d.runAsync(
-    `INSERT INTO meetings (title, started_at, duration_sec, audio_path, transcript, notes, mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO meetings (title, started_at, duration_sec, audio_path, transcript, notes, mode, segments)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.title,
       input.started_at,
@@ -87,6 +103,7 @@ export async function createMeeting(input: Omit<Meeting, 'id'>): Promise<number>
       input.transcript,
       input.notes,
       input.mode,
+      input.segments ?? null,
     ],
   );
   return r.lastInsertRowId;

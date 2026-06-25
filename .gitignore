@@ -15,6 +15,9 @@ web-build/
 # EAS / native build artifacts
 ios/
 android/
+# 但本地 Expo 原生模組的原始碼 ios/ 要保留（非 prebuild 產物）
+!meeting-record/modules/**/ios/
+!meeting-record/modules/**/ios/**
 *.ipa
 *.apk
 *.aab
@@ -60,6 +63,7 @@ yarn-debug.log*
 yarn-error.log*
 .tmp/
 tmp/
+docs/
 
 # Audio test artifacts
 *.wav
