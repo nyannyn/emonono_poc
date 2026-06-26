@@ -60,8 +60,11 @@ jobs:
           ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # 由 base64 secret 還原 ASC API Key .p8 到 eas.json 指定的 ascApiKeyPath（./asc_api_key.p8）
+          echo "$ASC_KEY_P8_BASE64" | base64 -d > asc_api_key.p8
           eas submit \
             --platform ios \
             --profile production \
             --non-interactive \
             --latest
+          rm -f asc_api_key.p8

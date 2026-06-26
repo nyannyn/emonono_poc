@@ -26,6 +26,7 @@ import {
 import { deleteAllMeetings } from '../storage/db';
 import { RootStackParamList } from '../navigation/AppNavigator';
 import { FEATURES, HAS_MANAGED_PROXY, MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
+import { fetchWithTimeout, parseJsonSafe } from '../llm/http';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -44,15 +45,15 @@ export default function SettingsView({ navigation }: Props) {
         ? `${MANAGED_PROXY_URL}/v1/models`
         : 'https://api.openai.com/v1/models';
       const token = managed ? MANAGED_PROXY_TOKEN : s.openaiApiKey;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: { Authorization: `Bearer ${token}` },
-      });
+      }, 30000);
       if (!res.ok) {
         setTesting('fail');
         setTestMsg(`HTTP ${res.status}：${await res.text()}`.slice(0, 200));
         return;
       }
-      const data = await res.json();
+      const data = await parseJsonSafe(res, '模型清單');
       setTesting('ok');
       setTestMsg(`✓ 連線成功，可用模型 ${data.data?.length ?? '?'} 個`);
     } catch (e: any) {

@@ -13,7 +13,7 @@ import RealtimeRecordingView from '../screens/RealtimeRecordingView';
 
 export type RootStackParamList = {
   Home: undefined;
-  Recording: { uploadedFileUri?: string } | undefined;
+  Recording: { uploadedFileUri?: string; retryMeetingId?: number } | undefined;
   Live: undefined;
   Realtime: undefined;
   Notes: { transcript?: string; meetingId?: number };

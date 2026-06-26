@@ -78,7 +78,11 @@ export default function MeetingsView({ navigation }: Props) {
         renderItem={({ item }) => (
           <Pressable
             style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-            onPress={() => navigation.navigate('Notes', { meetingId: item.id })}
+            onPress={() =>
+              item.transcript == null && item.audio_path
+                ? navigation.navigate('Recording', { retryMeetingId: item.id })
+                : navigation.navigate('Notes', { meetingId: item.id })
+            }
             onLongPress={() => onLongPress(item)}
           >
             <Text style={styles.rowDate}>{formatDate(item.started_at)}</Text>
@@ -86,7 +90,13 @@ export default function MeetingsView({ navigation }: Props) {
               {item.title || preview(item)}
             </Text>
             <Text style={styles.rowMeta}>
-              {item.notes ? '✓ 已整理' : item.transcript ? '逐字稿' : '空'}
+              {item.notes
+                ? '✓ 已整理'
+                : item.transcript
+                ? '逐字稿'
+                : item.audio_path
+                ? '待轉譯 · 點擊重新轉譯'
+                : '空'}
               {item.duration_sec ? `  ·  ${formatDuration(item.duration_sec)}` : ''}
               {item.mode ? `  ·  ${item.mode}` : ''}
             </Text>

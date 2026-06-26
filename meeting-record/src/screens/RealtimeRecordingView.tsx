@@ -8,7 +8,7 @@
 // - 此版本不存音檔（chunk 太小無法穩定 concat）
 
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -96,6 +96,17 @@ export default function RealtimeRecordingView({ navigation }: Props) {
   const compactErrorRef = useRef<string>('');
 
   useEffect(() => () => cleanup(), []);
+
+  // 進背景自動結束並保存目前片段
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const onStopRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'background' && phaseRef.current === 'streaming') onStopRef.current();
+    });
+    return () => sub.remove();
+  }, []);
 
   const cleanup = () => {
     if (tickRef.current) clearInterval(tickRef.current);
@@ -314,6 +325,8 @@ export default function RealtimeRecordingView({ navigation }: Props) {
     if (!ws || ws.readyState !== 1) return;
     ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64 }));
   };
+
+  onStopRef.current = () => { onStop(); };
 
   const onStop = async () => {
     if (tickRef.current) clearInterval(tickRef.current);

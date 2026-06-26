@@ -1,16 +1,15 @@
 // 把成員聲紋首句拼到會議錄音前面，讓 Whisper diarize 看到「同一個聲音」自動歸成一組
 // 加上 autoMapSpeakers：根據聲紋首句裡的「我是 ___」把 [speaker_X] 對應到成員姓名
+// 串流版：concat 用 FileHandle 視窗複製，避免整段會議錄音與合併檔同時佔記憶體。
 
 import { Directory, File, Paths } from 'expo-file-system';
 import { Member } from '../storage/db';
 
-interface ParsedWav {
-  header: Uint8Array;
-  data: Uint8Array;
-}
+const HEADER_SCAN_BYTES = 64 * 1024;
+const COPY_WINDOW = 4 * 1024 * 1024; // 4MB 串流視窗
 
+/** 正規 RIFF chunk walker：跳過 fmt / LIST / FLLR 等找 data（偶數對齊）。 */
 function findDataChunk(bytes: Uint8Array): { dataStart: number; header: Uint8Array } {
-  // 先驗 RIFF magic
   const isRiff =
     bytes.length >= 12 &&
     bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
@@ -20,7 +19,6 @@ function findDataChunk(bytes: Uint8Array): { dataStart: number; header: Uint8Arr
       .map((b) => (b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '?')).join('');
     throw new Error(`非 WAV (頭: "${head}")，可能 iOS 錄成 AAC`);
   }
-  // 正規 RIFF chunk walker（不只掃前 N bytes）：跳過 fmt / LIST / FLLR 等找 data
   const view = new DataView(bytes.buffer, bytes.byteOffset);
   let pos = 12; // 跳 "RIFF<size>WAVE"
   while (pos + 8 <= bytes.length) {
@@ -33,7 +31,7 @@ function findDataChunk(bytes: Uint8Array): { dataStart: number; header: Uint8Arr
     if (size % 2 === 1) pos += 1; // RIFF chunks 對齊到偶數
     if (pos < 0) break;
   }
-  throw new Error(`WAV 沒有 data chunk (掃完 ${bytes.length} bytes，最後 pos=${pos})`);
+  throw new Error(`WAV 沒有 data chunk (掃 ${bytes.length} bytes，最後 pos=${pos})`);
 }
 
 function rewriteHeader(header: Uint8Array, newDataLen: number): Uint8Array {
@@ -44,48 +42,81 @@ function rewriteHeader(header: Uint8Array, newDataLen: number): Uint8Array {
   return out;
 }
 
-async function readWav(uri: string): Promise<ParsedWav> {
+interface Seg { uri: string; dataStart: number; dataLen: number; header: Uint8Array; }
+
+/** 只讀檔頭解析 data 範圍，不讀整檔。 */
+function readWavMeta(uri: string): Seg {
   const f = new File(uri);
-  const bytes: Uint8Array = await (f as any).bytes();
-  const { dataStart, header } = findDataChunk(bytes);
-  return { header, data: bytes.subarray(dataStart) };
+  const size = f.size ?? 0;
+  if (size <= 0) throw new Error('檔案大小為 0');
+  const fh = f.open();
+  try {
+    fh.offset = 0;
+    const headScan = fh.readBytes(Math.min(HEADER_SCAN_BYTES, size));
+    const { dataStart, header } = findDataChunk(headScan);
+    return { uri, dataStart, dataLen: size - dataStart, header };
+  } finally {
+    fh.close();
+  }
 }
 
-/** 把多個同格式 WAV 串成一檔，壞段自動跳過，回傳新檔 URI（在 cache）。 */
+/** 把多個同格式 WAV 串成一檔，壞段自動跳過，回傳新檔 URI（在 cache）。串流複製避免 OOM。 */
 export async function concatWavs(uris: string[]): Promise<string> {
   if (uris.length === 0) throw new Error('沒有檔案可串');
 
-  const wavs: ParsedWav[] = [];
+  const segs: Seg[] = [];
   let skipped = 0;
   let firstError = '';
   for (const uri of uris) {
     try {
-      wavs.push(await readWav(uri));
+      segs.push(readWavMeta(uri));
     } catch (e: any) {
       skipped += 1;
       if (!firstError) firstError = String(e?.message ?? e);
     }
   }
 
-  if (wavs.length === 0) {
-    throw new Error(`所有 ${uris.length} 段都讀不出 WAV → ${firstError}`);
-  }
-  if (wavs.length === 1 && skipped === 0) return uris[0];
+  if (segs.length === 0) throw new Error(`所有 ${uris.length} 段都讀不出 WAV → ${firstError}`);
+  if (segs.length === 1 && skipped === 0) return segs[0].uri;
 
-  const totalLen = wavs.reduce((s, w) => s + w.data.length, 0);
-  const newHeader = rewriteHeader(wavs[0].header, totalLen);
-  const out = new Uint8Array(newHeader.length + totalLen);
-  out.set(newHeader, 0);
-  let off = newHeader.length;
-  for (const w of wavs) {
-    out.set(w.data, off);
-    off += w.data.length;
-  }
+  const totalLen = segs.reduce((s, w) => s + w.dataLen, 0);
+  const newHeader = rewriteHeader(segs[0].header, totalLen);
 
   const dir = new Directory(Paths.cache, 'wav_combined');
   if (!dir.exists) dir.create({ intermediates: true });
   const dest = new File(dir, `combined_${Date.now()}.wav`);
-  await (dest as any).write(out);
+  dest.create();
+
+  const out = dest.open();
+  try {
+    let writePos = 0;
+    out.offset = writePos;
+    out.writeBytes(newHeader);
+    writePos += newHeader.length;
+
+    for (const seg of segs) {
+      const fh = new File(seg.uri).open();
+      try {
+        let remaining = seg.dataLen;
+        let readPos = seg.dataStart;
+        while (remaining > 0) {
+          const n = Math.min(COPY_WINDOW, remaining);
+          fh.offset = readPos;
+          const buf = fh.readBytes(n);
+          if (buf.length === 0) break; // 防呆，避免無限迴圈
+          out.offset = writePos;
+          out.writeBytes(buf);
+          readPos += buf.length;
+          writePos += buf.length;
+          remaining -= buf.length;
+        }
+      } finally {
+        fh.close();
+      }
+    }
+  } finally {
+    out.close();
+  }
   return dest.uri;
 }
 
