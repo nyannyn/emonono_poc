@@ -152,7 +152,7 @@ export default function RecordingView({ navigation, route }: Props) {
     }
     const mb = sizeBytes / (1024 * 1024);
     if (mb > 24 && !uri.toLowerCase().endsWith('.wav')) {
-      return `音檔 ${mb.toFixed(1)} MB 超過 OpenAI 25MB 上限，且非 WAV 格式無法在 app 內自動切段。\n請改用 poc/transcribe_and_summarize.py（Python 端有 ffmpeg）。`;
+      return `音檔 ${mb.toFixed(1)} MB 超過雲端轉錄單檔 25MB 上限。\n請改用 app 內錄音（不限長度，會自動分段），或上傳 25MB 以內的音檔。`;
     }
     return null;
   };

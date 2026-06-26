@@ -1,6 +1,7 @@
 // 設定持久化 — 用 expo-secure-store
 
 import * as SecureStore from 'expo-secure-store';
+import { HAS_MANAGED_PROXY } from '../config/features';
 
 export type Mode = 'openai' | 'local';
 // 'managed' = 走我們自架的 proxy（內建 key，使用者免設定）；'own' = 使用者自己的 OpenAI key
@@ -54,12 +55,22 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export async function loadSettings(): Promise<Settings> {
   const raw = await SecureStore.getItemAsync(KEY);
-  if (!raw) return DEFAULT_SETTINGS;
-  try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-  } catch {
-    return DEFAULT_SETTINGS;
+  let s = DEFAULT_SETTINGS;
+  if (raw) {
+    try {
+      s = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    } catch {
+      s = DEFAULT_SETTINGS;
+    }
   }
+  // 沒設 managed proxy 的 build（EXPO_PUBLIC_PROXY_URL 未設）：強制走自己的 key。
+  // 否則 keySource 預設 'managed'，設定頁既不顯示切換鈕（需 HAS_MANAGED_PROXY）也不顯示
+  // API Key 欄（managed 時隱藏）→ 使用者被鎖在 managed 卻無 proxy，測試連線與轉錄都會
+  // 打到空的 base URL → Network request failed。
+  if (!HAS_MANAGED_PROXY && s.keySource === 'managed') {
+    s = { ...s, keySource: 'own' };
+  }
+  return s;
 }
 
 export async function saveSettings(s: Settings): Promise<void> {

@@ -108,6 +108,8 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
         analyzer = nil
         transcriber = nil
         converter = nil
+        // 釋放 audio session，讓之後的播放／其他 App 不被 .playAndRecord 卡住。
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
     // MARK: - Private
@@ -160,6 +162,16 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
         into continuation: AsyncStream<AnalyzerInput>.Continuation,
         recordingTo recordingURL: URL?
     ) throws {
+        // 先把共用的 AVAudioSession 設成可錄音並啟用，否則 inputNode 的硬體格式會是無效的
+        // （sampleRate 可能為 0），接著 installTap / audioEngine.start() 會丟 ObjC NSException
+        //（"required condition is false: IsFormatSampleRateAndChannelCountValid(format)"），
+        // Swift 的 try/catch 接不住 → App 直接閃退。設成 .playAndRecord + active 後格式才有效；
+        // 這裡的 try 會丟可被 JS 接住的 Swift error（降級成「啟動失敗」訊息，而非崩潰）。
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .default,
+                                options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true)
+
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
