@@ -43,9 +43,12 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
     }
 
     func startTranscription(recordingTo recordingURL: URL?) async throws -> AsyncThrowingStream<TranscriptUpdate, Error> {
+        // 0. 解析裝置實際支援、與要求語系最相符的 Locale（容忍 zh-TW / zh_TW / zh-Hant-TW 差異）。
+        let resolvedLocale = try await resolveSupportedLocale()
+
         // 1. 建立 transcriber，要求回報暫定(volatile)結果與每個 run 的時間範圍。
         let transcriber = SpeechTranscriber(
-            locale: locale,
+            locale: resolvedLocale,
             transcriptionOptions: [],
             reportingOptions: [.volatileResults],
             attributeOptions: [.audioTimeRange]
@@ -53,7 +56,7 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
         self.transcriber = transcriber
 
         // 2. 確認語系模型已安裝（含 reserve），未安裝則下載。
-        try await ensureModelInstalled(for: transcriber)
+        try await ensureModelInstalled(for: transcriber, locale: resolvedLocale)
 
         // 3. 建立 analyzer，掛上 transcriber 模組。
         let analyzer = SpeechAnalyzer(modules: [transcriber])
@@ -109,20 +112,48 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
 
     // MARK: - Private
 
-    private func ensureModelInstalled(for transcriber: SpeechTranscriber) async throws {
+    /// 解析出裝置實際支援、與要求語系最相符的 Locale。
+    /// 直接字串比對 identifier 太脆（"zh-TW" vs "zh_TW" vs "zh-Hant-TW" 會誤判不支援），
+    /// 改成正規化分隔符/大小寫後比對，再退讓用「語言+地區」「同語言」匹配。
+    private func resolveSupportedLocale() async throws -> Locale {
+        let supported = await SpeechTranscriber.supportedLocales
+        if let match = Self.bestMatch(for: locale, in: supported) { return match }
+        throw TranscriptionError.localeNotSupported(locale.identifier)
+    }
+
+    private func ensureModelInstalled(for transcriber: SpeechTranscriber, locale: Locale) async throws {
         let installed = await SpeechTranscriber.installedLocales
-        let isInstalled = installed.contains { $0.identifier == locale.identifier }
+        let isInstalled = Self.bestMatch(for: locale, in: installed) != nil
 
         if !isInstalled {
-            let supported = await SpeechTranscriber.supportedLocales
-            guard supported.contains(where: { $0.identifier == locale.identifier }) else {
-                throw TranscriptionError.localeNotSupported(locale.identifier)
-            }
             if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
                 try await request.downloadAndInstall()
             }
         }
         try await AssetInventory.reserve(locale: locale)
+    }
+
+    /// 容錯的語系匹配：正規化分隔符/大小寫 → 語言+地區 → 同語言（優先繁中 TW/HK/Hant）。
+    private static func bestMatch(for requested: Locale, in pool: [Locale]) -> Locale? {
+        func norm(_ id: String) -> String {
+            id.replacingOccurrences(of: "_", with: "-").lowercased()
+        }
+        let target = norm(requested.identifier)
+        if let exact = pool.first(where: { norm($0.identifier) == target }) { return exact }
+
+        let reqLang = requested.language.languageCode?.identifier
+        let reqRegion = requested.region?.identifier
+        if reqRegion != nil,
+           let m = pool.first(where: {
+               $0.language.languageCode?.identifier == reqLang && $0.region?.identifier == reqRegion
+           }) { return m }
+
+        let sameLang = pool.filter { $0.language.languageCode?.identifier == reqLang }
+        if let pref = sameLang.first(where: {
+            let id = norm($0.identifier)
+            return id.contains("tw") || id.contains("hant") || id.contains("hk")
+        }) { return pref }
+        return sameLang.first
     }
 
     private func startAudioCapture(
