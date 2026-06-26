@@ -45,22 +45,28 @@ function StartupErrorScreen() {
   return React.createElement(
     ScrollView,
     {
-      style: { flex: 1, backgroundColor: '#1b1b1b' },
-      contentContainerStyle: { padding: 24, paddingTop: 80 },
+      style: { flex: 1, backgroundColor: '#FBFAF6' },
+      contentContainerStyle: { padding: 28, paddingTop: 96 },
     },
     React.createElement(
       Text,
-      { style: { color: '#ff6b6b', fontSize: 18, fontWeight: '700', marginBottom: 12 } },
-      '啟動錯誤（請截圖回報）',
+      { style: { color: '#1b1b1b', fontSize: 20, fontWeight: '700', marginBottom: 10 } },
+      'App 啟動遇到問題',
     ),
     React.createElement(
       Text,
-      { selectable: true, style: { color: '#fff', fontSize: 13, lineHeight: 20 } },
+      { style: { color: '#555', fontSize: 14, lineHeight: 22, marginBottom: 20 } },
+      '請重新開啟 App 再試一次。若持續發生，麻煩把這個畫面截圖回報給開發者。',
+    ),
+    // 技術細節（縮小、次要）：保留以便 beta 回報定位，不影響一般使用者理解。
+    React.createElement(
+      Text,
+      { selectable: true, style: { color: '#a00', fontSize: 12, lineHeight: 18 } },
       message,
     ),
     React.createElement(
       Text,
-      { selectable: true, style: { color: '#aaa', fontSize: 11, lineHeight: 16, marginTop: 16 } },
+      { selectable: true, style: { color: '#999', fontSize: 10, lineHeight: 15, marginTop: 12 } },
       stack,
     ),
   );
