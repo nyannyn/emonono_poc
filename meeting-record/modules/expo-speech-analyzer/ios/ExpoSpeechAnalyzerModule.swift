@@ -64,7 +64,16 @@ public class ExpoSpeechAnalyzerModule: Module {
             self.currentRecordingURL = url
         }
 
-        let stream = try await transcriber.startTranscription(recordingTo: url)
+        // 啟動序列若中途失敗（如 analyzer.start 丟錯），startAudioCapture 可能已把
+        // audioEngine 起來、AVAudioSession 設成 active 並裝了 tap → 不回收的話麥克風會一直開著。
+        // 失敗即 stopAnalyzer() 收回 engine + session，再把錯誤往上拋給 JS。
+        let stream: AsyncThrowingStream<TranscriptUpdate, Error>
+        do {
+            stream = try await transcriber.startTranscription(recordingTo: url)
+        } catch {
+            await stopAnalyzer()
+            throw error
+        }
         self.consumeTask = Task { [weak self] in
             guard let self else { return }
             do {

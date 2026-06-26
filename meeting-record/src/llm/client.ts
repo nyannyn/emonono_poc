@@ -126,7 +126,7 @@ export class LLMClient {
 
     if (size > MAX && !fileUri.toLowerCase().endsWith('.wav')) {
       throw new Error(
-        `音檔 ${(size / 1048576).toFixed(1)} MB 超過 25MB 上限，且非 WAV 格式無法在 app 內切段。請改用 poc/transcribe_and_summarize.py（Python 端有 ffmpeg）。`,
+        `音檔 ${(size / 1048576).toFixed(1)} MB 超過雲端轉錄單檔 25MB 上限。請改用 app 內錄音（不限長度，會自動分段），或上傳 25MB 以內的音檔。`,
       );
     }
 

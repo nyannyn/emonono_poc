@@ -15,7 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
+} from './speechRecognition';
 import * as SpeechAnalyzer from '../../modules/expo-speech-analyzer';
 
 // 中文（台灣）軟體工程會議常見英文技術名詞，餵給辨識器當 contextualStrings 提升準度
@@ -138,7 +138,7 @@ export function useDeviceLiveTranscription(): DeviceTranscription {
   }, []);
 
   const beginExpoRecognition = () => {
-    ExpoSpeechRecognitionModule.start({
+    ExpoSpeechRecognitionModule?.start({
       lang: langRef.current,
       interimResults: true,
       continuous: true,
@@ -167,6 +167,11 @@ export function useDeviceLiveTranscription(): DeviceTranscription {
       return;
     }
 
+    if (!ExpoSpeechRecognitionModule) {
+      wantRef.current = false;
+      setListening(false);
+      throw new Error('此 build 未連結裝置端語音辨識模組（ExpoSpeechRecognition），請改用雲端模式');
+    }
     const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!perm.granted) {
       wantRef.current = false;
@@ -181,7 +186,7 @@ export function useDeviceLiveTranscription(): DeviceTranscription {
     if (engineRef.current === 'analyzer') {
       SpeechAnalyzer.stop();
     } else {
-      ExpoSpeechRecognitionModule.stop();
+      ExpoSpeechRecognitionModule?.stop();
     }
   };
 
