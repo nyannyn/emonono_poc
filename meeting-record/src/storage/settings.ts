@@ -18,11 +18,12 @@ export interface Settings {
   openaiTranscriptionModel: string; // 預設 whisper-1
   openaiChatModel: string;          // 預設 gpt-4.1
 
-  // 本地 Ollama + 本地 Whisper（之後 production 用）
+  // 自訂 LLM 端點（mode='local'）：本地 Ollama 或免費雲端（Gemini/Groq，OpenAI 相容）
   llmUrl: string;
   whisperUrl: string;
   username: string;
   password: string;
+  llmApiKey: string; // 免費雲端用 Bearer key；本地 Ollama 留空
   model: string;
 
   // Live 即時字幕的轉譯來源：'device' = iOS 裝置端（免費/離線）；'openai' = 雲端（較準）
@@ -47,7 +48,8 @@ export const DEFAULT_SETTINGS: Settings = {
   whisperUrl: '',
   username: '',
   password: '',
-  model: 'gpt-oss',
+  llmApiKey: '',
+  model: 'gemini-2.0-flash',
   liveSttSource: 'device',
   language: 'zh',
   lastSpeakerMapping: {},

@@ -159,7 +159,7 @@ export default function SettingsView({ navigation }: Props) {
         {FEATURES.localOllamaMode && (
           <View style={styles.segment}>
             <ModeButton label="OpenAI GPT" active={s.mode === 'openai'} onPress={() => update('mode', 'openai')} />
-            <ModeButton label="本地 Ollama" active={s.mode === 'local'} onPress={() => update('mode', 'local')} />
+            <ModeButton label="免費雲端 / 自訂" active={s.mode === 'local'} onPress={() => update('mode', 'local')} />
           </View>
         )}
 
@@ -173,29 +173,28 @@ export default function SettingsView({ navigation }: Props) {
         ) : (
           <>
             <Field
-              label="Ollama URL"
+              label="API 端點（OpenAI 相容）"
               value={s.llmUrl}
               onChangeText={(v) => update('llmUrl', v)}
-              placeholder="https://xxx.ngrok.io/v1"
+              placeholder="https://generativelanguage.googleapis.com/v1beta/openai"
               keyboardType="url"
             />
             <Field
-              label="使用者名稱"
-              value={s.username}
-              onChangeText={(v) => update('username', v)}
-            />
-            <Field
-              label="密碼"
-              value={s.password}
-              onChangeText={(v) => update('password', v)}
+              label="API Key（免費雲端用；本地 Ollama 免填）"
+              value={s.llmApiKey}
+              onChangeText={(v) => update('llmApiKey', v)}
+              placeholder="貼上 Gemini / Groq 免費 key"
               secureTextEntry
             />
             <Field
               label="模型名"
               value={s.model}
               onChangeText={(v) => update('model', v)}
-              placeholder="gpt-oss"
+              placeholder="gemini-2.0-flash"
             />
+            <Text style={styles.note}>
+              免費雲端：填「API 端點 + API Key + 模型名」。Gemini → 端點 …/v1beta/openai、模型 gemini-2.0-flash；Groq → 端點 https://api.groq.com/openai/v1。本地/同網段 Ollama → 端點 http://IP:11434/v1、Key 留空。
+            </Text>
           </>
         )}
 

@@ -133,9 +133,9 @@ export default function NotesView({ navigation, route }: Props) {
       setAltError('要切到 OpenAI 比對需先填 API Key');
       return;
     }
-    if (other === 'local' && (!s.llmUrl || !s.username)) {
+    if (other === 'local' && !s.llmUrl) {
       setAltMode(other);
-      setAltError('要切到 Ollama 比對需先填 Ollama URL / 帳密');
+      setAltError('要切到自訂／雲端比對需先填 API 端點');
       return;
     }
     setAltMode(other);
