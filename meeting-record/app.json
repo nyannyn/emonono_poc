@@ -47,7 +47,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#F3F1EC"
+        "backgroundColor": "#DEC59A"
       },
       "package": "com.ella.meetingrecord",
       "permissions": [
