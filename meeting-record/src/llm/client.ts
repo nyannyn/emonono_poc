@@ -50,11 +50,12 @@ export interface ClientConfig {
   openaiApiKey?: string;
   openaiTranscriptionModel?: string;
   openaiChatModel?: string;
-  // Local
+  // Local / 自訂 OpenAI 相容端點（本地 Ollama 或免費雲端 Gemini/Groq）
   llmUrl?: string;
   whisperUrl?: string;
   username?: string;
   password?: string;
+  llmApiKey?: string;
   model?: string;
 }
 
@@ -89,8 +90,11 @@ export class LLMClient {
     }
     return {
       url: `${this.trim(this.cfg.llmUrl ?? '')}/chat/completions`,
-      auth: `Basic ${btoa(`${this.cfg.username ?? ''}:${this.cfg.password ?? ''}`)}`,
-      model: this.cfg.model || 'gpt-oss',
+      // 有 API Key → Bearer（免費雲端 Gemini/Groq）；否則 Basic（本地 Ollama，留空也行）
+      auth: this.cfg.llmApiKey
+        ? `Bearer ${this.cfg.llmApiKey}`
+        : `Basic ${btoa(`${this.cfg.username ?? ''}:${this.cfg.password ?? ''}`)}`,
+      model: this.cfg.model || 'gemini-2.0-flash',
     };
   }
 

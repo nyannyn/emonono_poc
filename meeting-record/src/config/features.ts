@@ -16,8 +16,12 @@ export const MANAGED_PROXY_TOKEN = process.env.EXPO_PUBLIC_PROXY_TOKEN ?? '';
 export const HAS_MANAGED_PROXY = MANAGED_PROXY_URL.length > 0;
 
 export const FEATURES = {
-  /** 本地 Ollama LLM 模式（Settings 的 LLM 來源切換 + NotesView 比對）。 */
-  localOllamaMode: !IS_PUBLIC_BUILD,
+  /**
+   * 本地 Ollama LLM 模式（Settings 的 LLM 來源切換 + NotesView 比對）。
+   * 刻意永遠開啟（含 App Store 正式版）：使用者要在單一 build 直接用自架 Ollama，不另出內部版。
+   * 代價：送 App Store 審查時，審查員也會看到「填外部 ngrok 端點」的本地模式欄位。
+   */
+  localOllamaMode: true,
   /** Realtime WebSocket 串流轉譯（實驗）。 */
   realtimeStreaming: !IS_PUBLIC_BUILD,
 };
