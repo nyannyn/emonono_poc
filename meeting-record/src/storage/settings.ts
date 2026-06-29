@@ -29,6 +29,10 @@ export interface Settings {
   // Live 即時字幕的轉譯來源：'device' = iOS 裝置端（免費/離線）；'openai' = 雲端（較準）
   liveSttSource: 'device' | 'openai';
 
+  // 整段錄音的預設轉譯來源：'device' = iOS 裝置端原生（免費/離線/不分講者）；
+  // 'cloud' = 雲端分講者（OpenAI 或 Gemini）。有可分講者的雲端 key 時，每次轉譯前還會跳選單覆寫。
+  recordSttSource: 'device' | 'cloud';
+
   // 共用
   language: 'zh' | 'en' | 'auto';
 
@@ -51,9 +55,36 @@ export const DEFAULT_SETTINGS: Settings = {
   llmApiKey: '',
   model: 'gemini-2.0-flash',
   liveSttSource: 'device',
+  recordSttSource: 'device',
   language: 'zh',
   lastSpeakerMapping: {},
 };
+
+// === 整段錄音 per-session 選單：偵測可用的雲端分講者供應商 ===
+export type Diarizer = 'openai' | 'gemini';
+
+/** llmUrl 是否指向 Gemini（generativelanguage）端點。 */
+export function isGeminiEndpoint(url: string): boolean {
+  return /generativelanguage\.googleapis\.com/i.test(url ?? '');
+}
+
+/** OpenAI 分講者可用：走 managed proxy（內建 key）或自備 OpenAI key。 */
+export function hasOpenAiDiarization(s: Settings): boolean {
+  return s.keySource === 'managed' || !!s.openaiApiKey.trim();
+}
+
+/** Gemini 分講者可用：mode='local' 且填了 Bearer key 且端點是 Gemini。 */
+export function hasGeminiDiarization(s: Settings): boolean {
+  return s.mode === 'local' && !!s.llmApiKey.trim() && isGeminiEndpoint(s.llmUrl);
+}
+
+/** 本次轉譯可選的雲端分講者供應商（Gemini 優先列，因免費）。空陣列 → 只有原生、不跳選單。 */
+export function availableDiarizers(s: Settings): Diarizer[] {
+  const out: Diarizer[] = [];
+  if (hasGeminiDiarization(s)) out.push('gemini');
+  if (hasOpenAiDiarization(s)) out.push('openai');
+  return out;
+}
 
 export async function loadSettings(): Promise<Settings> {
   const raw = await SecureStore.getItemAsync(KEY);

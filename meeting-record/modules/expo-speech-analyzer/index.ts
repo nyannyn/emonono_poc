@@ -58,6 +58,17 @@ export function stop(): Promise<void> {
   return Native.stop();
 }
 
+/**
+ * 一次性轉譯整個音檔（iOS 26+ 裝置端、離線、不上傳）。回傳逐句定稿結果（含時間戳）。
+ * 給「整段錄音」原生路線用（非即時）。Expo Go / 非 iOS 26 因 isAvailable()=false 不會被呼叫。
+ * @param uri 音檔 file:// URI（app 內錄的 WAV，或可被 AVAudioFile 讀的格式）
+ * @param locale BCP-47 語系（如 "zh-TW" / "en-US"）
+ */
+export function transcribeFile(uri: string, locale: string): Promise<AnalyzerResult[]> {
+  if (!Native) return Promise.reject(new Error('ExpoSpeechAnalyzer 原生模組不可用'));
+  return Native.transcribeFile(uri, locale);
+}
+
 export function addResultListener(cb: (r: AnalyzerResult) => void): EventSubscription {
   return Native.addListener('onResult', cb);
 }

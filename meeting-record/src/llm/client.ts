@@ -5,12 +5,26 @@
 import { File } from 'expo-file-system';
 import { KeySource, Mode } from '../storage/settings';
 import { cleanupChunks, splitWavIfNeeded } from '../audio/wavChunker';
+import { autoMapSpeakers, prependVoiceprints } from '../audio/voiceprintMix';
+import { Member } from '../storage/db';
 import { MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
 import { fetchWithTimeout, parseJsonSafe } from './http';
 
 // 各類請求逾時：STT 上傳較久、chat 中等
 const STT_TIMEOUT_MS = 300000; // 5 分鐘（大檔上傳 + 轉譯）
 const CHAT_TIMEOUT_MS = 120000; // 2 分鐘
+
+// === Gemini 分講者（CP1 實測驗證）===
+// 走 Gemini 原生 generateContent + inline_data base64（非 OpenAI 相容端點，才能設 thinkingBudget）。
+const GEMINI_DIARIZE_MODEL = 'gemini-2.5-flash'; // 免費層唯一可用；2.0-flash 免費額度=0
+const GEMINI_CHUNK_MAX = 12 * 1024 * 1024;       // 每段 ≤12MB WAV → base64 <20MB inline 上限；切段亦避免長檔崩潰
+const GEMINI_DIARIZE_PROMPT = `請把這段會議錄音整理成「帶講者標註的逐字稿」（speaker diarization）。
+要求：
+1. 全程使用繁體中文輸出。
+2. 每當說話者改變就另起一段，段首標講者標籤，格式固定為「Speaker N:」（N 為阿拉伯數字，從 1 起算）。同一個人沿用同一個編號。
+3. 逐字照實轉錄（保留口語），但修正明顯的語音辨識錯誤並補上標點。
+4. 技術名詞（NVMe、PCIe、SSD 等）保留英文。
+5. 只輸出逐字稿本身，開頭不要任何前言或說明。`;
 
 export const MEETING_NOTES_PROMPT = `你是一位專業的會議記錄整理員。請根據以下會議逐字稿，整理成一份完整的繁體中文會議記錄。
 
@@ -197,6 +211,87 @@ export class LLMClient {
     return formatTranscript(await parseJsonSafe(res, 'STT 回應'));
   }
 
+  // 從 llmUrl 取 origin（File/generateContent 用 Gemini 原生 base，非 OpenAI 相容路徑）
+  private geminiOrigin(): string {
+    const m = (this.cfg.llmUrl ?? '').match(/^(https?:\/\/[^/]+)/i);
+    return m ? m[1] : 'https://generativelanguage.googleapis.com';
+  }
+
+  /** 單段音檔（base64 WAV）→ Gemini 帶 `Speaker N:` 標籤的原始逐字稿文字。 */
+  private async geminiDiarizeInline(base64Audio: string): Promise<string> {
+    const url = `${this.geminiOrigin()}/v1beta/models/${GEMINI_DIARIZE_MODEL}:generateContent`;
+    const res = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': this.cfg.llmApiKey ?? '',
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: 'audio/wav', data: base64Audio } },
+            { text: GEMINI_DIARIZE_PROMPT },
+          ],
+        }],
+        generationConfig: {
+          maxOutputTokens: 32768,
+          temperature: 0,
+          thinkingConfig: { thinkingBudget: 0 }, // 必設：thinking 開會回空字串/重複迴圈（CP1 實證）
+        },
+      }),
+    }, STT_TIMEOUT_MS);
+    if (!res.ok) throw new Error(`Gemini STT ${res.status}: ${await res.text()}`);
+    const data = await parseJsonSafe(res, 'Gemini 回應');
+    const parts = data?.candidates?.[0]?.content?.parts ?? [];
+    return parts.map((p: any) => p?.text ?? '').join('').trim();
+  }
+
+  /**
+   * Gemini 分講者轉錄（CP1 驗證流程）：切 ≤12MB WAV 段 → 每段拼聲紋 → inline 轉錄
+   * → 正規化 [speaker_N] → autoMapSpeakers 反推姓名（跨段以姓名一致）→ 重複迴圈過濾 → 串接。
+   * 僅支援 app 內錄的 WAV（裝置端無 ffmpeg，無法切段非 WAV 長檔）。
+   */
+  async transcribeWithGeminiDiarized(
+    fileUri: string,
+    members: Member[],
+    opts: { onProgress?: (done: number, total: number) => void } = {},
+  ): Promise<string> {
+    if (!fileUri.toLowerCase().endsWith('.wav')) {
+      let size = 0;
+      try { size = new File(fileUri).size ?? 0; } catch { /* 取不到當小檔 */ }
+      if (size > GEMINI_CHUNK_MAX) {
+        throw new Error('Gemini 分講者目前只支援 app 內錄的 WAV（裝置端無法切段非 WAV 長檔）。請改用 app 內錄音，或改用 OpenAI 分講者。');
+      }
+    }
+
+    const chunks = await splitWavIfNeeded(fileUri, GEMINI_CHUNK_MAX, GEMINI_CHUNK_MAX);
+    const outParts: string[] = [];
+    try {
+      for (const c of chunks) {
+        opts.onProgress?.(c.index, c.total);
+        // 每段都拼聲紋首句，讓本段 diarize 結果能用 autoMapSpeakers 反推姓名（解跨段編號不一致）
+        let chunkUri = c.uri;
+        if (members.length > 0) {
+          try { chunkUri = await prependVoiceprints(c.uri, members); } catch { chunkUri = c.uri; }
+        }
+        const b64 = await new File(chunkUri).base64();
+        if (chunkUri !== c.uri) { try { new File(chunkUri).delete(); } catch { /* 清不掉忽略 */ } }
+
+        let raw = await this.geminiDiarizeInline(b64);
+        raw = collapseRepeats(raw);
+        let text = formatTranscript({ text: raw });
+        if (members.length > 0 && /\[speaker[_\s]?\w+\]/i.test(text)) {
+          text = autoMapSpeakers(text, members).text;
+        }
+        outParts.push(text.trim());
+      }
+    } finally {
+      cleanupChunks(chunks, fileUri);
+    }
+    opts.onProgress?.(chunks.length, chunks.length);
+    return outParts.filter(Boolean).join('\n\n');
+  }
+
   async generateMeetingNotes(transcript: string): Promise<{ text: string; usage: TokenUsage }> {
     const ep = this.llmEndpoint();
     const prompt = MEETING_NOTES_PROMPT.replace('{transcript}', transcript);
@@ -282,4 +377,23 @@ function normalizeSpeakerLabel(raw: string): string {
   const m = raw.match(/(\w+)$/);
   const tail = m ? m[1] : raw;
   return `speaker_${tail.toLowerCase()}`;
+}
+
+/** 收掉連續重複的短句（音訊 LLM 尾端每句「嗯。」重複迴圈幻覺）；保留前 maxKeep 句。 */
+function collapseRepeats(text: string, maxKeep = 2, shortLen = 6): string {
+  const out: string[] = [];
+  let prev = '';
+  let run = 0;
+  for (const line of text.split('\n')) {
+    const body = line.replace(/^\s*Speaker\s*\w+\s*:\s*/i, '').trim();
+    if (body === prev && body.length <= shortLen) {
+      run += 1;
+      if (run >= maxKeep) continue;
+    } else {
+      prev = body;
+      run = 0;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
 }

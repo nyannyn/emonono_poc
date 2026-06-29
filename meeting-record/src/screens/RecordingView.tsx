@@ -1,7 +1,7 @@
 // RecordingView — 整段錄完才送 + 可選與會者拼前置聲紋讓 Whisper 自動配對講者
 
 import { useEffect, useRef, useState } from 'react';
-import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActionSheetIOS, Alert, AppState, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -9,8 +9,9 @@ import { AudioModule, IOSOutputFormat, RecordingPresets, useAudioRecorder } from
 import { Directory, File, Paths } from 'expo-file-system';
 import { LLMClient } from '../llm/client';
 import { createMeeting, getMeeting, listMembers, Member, updateMeeting } from '../storage/db';
-import { loadSettings, Settings } from '../storage/settings';
+import { availableDiarizers, Diarizer, loadSettings } from '../storage/settings';
 import { autoMapSpeakers, prependVoiceprints } from '../audio/voiceprintMix';
+import * as SpeechAnalyzer from '../../modules/expo-speech-analyzer';
 import { Color, FontFamily, Radius } from '../theme/tokens';
 import { RootStackParamList } from '../navigation/AppNavigator';
 
@@ -18,6 +19,30 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Recording'>;
 type Phase = 'idle' | 'recording' | 'attendees' | 'transcribing' | 'done' | 'error';
 
 const KEEP_AWAKE_TAG = 'meeting-record';
+
+type Route = 'device' | Diarizer;
+
+/** 本次轉譯方式選單（原生預設）。只有偵測到可分講者的雲端 key 時才呼叫。 */
+function pickTranscribeRoute(diarizers: Diarizer[]): Promise<Route> {
+  const labels = ['裝置原生（免費・不分講者）'];
+  const routes: Route[] = ['device'];
+  if (diarizers.includes('gemini')) { labels.push('Gemini 分講者（免費・雲端）'); routes.push('gemini'); }
+  if (diarizers.includes('openai')) { labels.push('OpenAI 分講者（付費・最準）'); routes.push('openai'); }
+
+  return new Promise((resolve) => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { title: '本次轉譯方式', options: [...labels, '取消'], cancelButtonIndex: labels.length },
+        (i) => resolve(i == null || i >= routes.length ? 'device' : routes[i]),
+      );
+    } else {
+      Alert.alert('本次轉譯方式', undefined, [
+        ...routes.map((r, i) => ({ text: labels[i], onPress: () => resolve(r) })),
+        { text: '取消', style: 'cancel', onPress: () => resolve('device') },
+      ]);
+    }
+  });
+}
 
 export default function RecordingView({ navigation, route }: Props) {
   const WAV_OPTIONS = {
@@ -125,14 +150,6 @@ export default function RecordingView({ navigation, route }: Props) {
     }
   };
 
-  const verifySettings = (s: Settings): string | null => {
-    if (s.keySource !== 'managed' && !s.openaiApiKey) return '請先到設定填 OpenAI API Key（STT 用）';
-    if (s.mode === 'local' && (!s.llmUrl || !s.username)) {
-      return '本地 Ollama 模式還需填 Ollama URL / 帳密';
-    }
-    return null;
-  };
-
   const moveToRecordings = (sourceUri: string): string => {
     const dir = new Directory(Paths.document, 'recordings');
     if (!dir.exists) dir.create({ intermediates: true });
@@ -159,9 +176,7 @@ export default function RecordingView({ navigation, route }: Props) {
 
   const onStart = async () => {
     setError('');
-    const s = await loadSettings();
-    const issue = verifySettings(s);
-    if (issue) { setError(issue); setPhase('error'); return; }
+    // 預設原生轉譯（免費、不需 key）；雲端路線的可用性與選擇延到 runTranscribe 處理。
     const perm = await AudioModule.requestRecordingPermissionsAsync();
     if (!perm.granted) { setError('麥克風權限被拒'); setPhase('error'); return; }
     try {
@@ -222,8 +237,57 @@ export default function RecordingView({ navigation, route }: Props) {
   const runTranscribe = async (id: number, path: string, selected: Member[]) => {
     setPhase('transcribing');
     setMappedSummary('');
+    setChunkProg(null);
     try {
       const s = await loadSettings();
+      const diarizers = availableDiarizers(s);
+
+      // 路線決定：預設原生（免費）。偵測到可分講者的雲端 key → 跳本次選單（原生為預設）。
+      let route: Route = 'device';
+      if (diarizers.length > 0) route = await pickTranscribeRoute(diarizers);
+
+      // 原生（裝置端）：Expo Go / iOS<26 無法檔案轉譯 → 退回雲端或提示。
+      if (route === 'device') {
+        if (SpeechAnalyzer.isAvailable()) {
+          // 原生檔案轉譯（離線、不上傳）：逐句定稿 → 組逐字稿 + 寫 segments（NotesView 可點句跳播）
+          const locale = s.language === 'en' ? 'en-US' : 'zh-TW';
+          const segs = await SpeechAnalyzer.transcribeFile(path, locale);
+          const text = segs.map((x) => x.text).join('\n').trim();
+          const segJson = JSON.stringify(segs.map((x) => ({ t: x.startTime, text: x.text })));
+          setTranscript(text);
+          await updateMeeting(id, {
+            transcript: text, segments: segJson, duration_sec: elapsed || null, mode: 'device',
+          });
+          setMeetingId(id);
+          setPhase('done');
+          return;
+        }
+        if (diarizers.length === 0) {
+          setError('裝置端原生轉譯需 iOS 26 ＋ 正式版 / dev build（Expo Go 不支援）。請到設定填 OpenAI 或 Gemini key 改用雲端。');
+          setPhase('error');
+          return;
+        }
+        route = diarizers[0];
+        setMappedSummary(`裝置端原生轉譯需 iOS 26＋正式版/dev build，本次改用${route === 'gemini' ? ' Gemini' : ' OpenAI'}雲端分講者`);
+      }
+
+      // Gemini 分講者（切段 + 每段拼聲紋反推姓名，跨段以姓名一致）
+      if (route === 'gemini') {
+        const client = new LLMClient(s);
+        const text = await client.transcribeWithGeminiDiarized(path, selected, {
+          onProgress: (done, total) => total > 1 && setChunkProg({ done, total }),
+        });
+        setTranscript(text);
+        if (selected.length > 0) {
+          setMappedSummary((p) => (p ? p + '；' : '') + 'Gemini 分講者完成（聲紋反推姓名，可在 Notes「對應講者」手動修正）');
+        }
+        await updateMeeting(id, { transcript: text, duration_sec: elapsed || null, mode: s.mode });
+        setMeetingId(id);
+        setPhase('done');
+        return;
+      }
+
+      // OpenAI 分講者（原流程：拼聲紋 → diarize → autoMap）
       let finalPath = path;
       if (selected.length > 0) {
         try {
@@ -240,7 +304,6 @@ export default function RecordingView({ navigation, route }: Props) {
 
       const client = new LLMClient(s);
       const lang = s.language === 'auto' ? undefined : s.language;
-      setChunkProg(null);
       let text = await client.transcribe(finalPath, {
         language: lang,
         prompt: '以下是一段繁體中文（台灣用語）的會議錄音逐字稿，可能夾雜少量英文技術名詞。',

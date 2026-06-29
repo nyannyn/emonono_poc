@@ -112,6 +112,78 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
+    /// 一次性轉譯整個音檔（非即時，給「整段錄音」原生路線用）。
+    /// 刻意重用即時路徑驗證過的 `analyzer.start(inputSequence:)` + `transcriber.results` + `convert`，
+    /// 只把 buffer 來源從麥克風 tap 換成讀 `AVAudioFile`（無需 AVAudioSession / 麥克風）。
+    /// ⚠️ 尚未在 iOS 26 dev build 實機驗證（CP3 staged）。
+    func transcribeFile(url: URL) async throws -> [TranscriptUpdate] {
+        let resolvedLocale = try await resolveSupportedLocale()
+
+        let transcriber = SpeechTranscriber(
+            locale: resolvedLocale,
+            transcriptionOptions: [],
+            reportingOptions: [],                 // 檔案批次只需定稿結果（不要 volatile）
+            attributeOptions: [.audioTimeRange]
+        )
+        self.transcriber = transcriber
+        try await ensureModelInstalled(for: transcriber, locale: resolvedLocale)
+
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        self.analyzer = analyzer
+
+        let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
+
+        let audioFile = try AVAudioFile(forReading: url)
+        let fileFormat = audioFile.processingFormat
+
+        let (inputStream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        self.inputContinuation = continuation
+
+        // 收集定稿結果（含逐句時間範圍 → startTime）
+        let collector = Task { () -> [TranscriptUpdate] in
+            var out: [TranscriptUpdate] = []
+            for try await result in transcriber.results {
+                guard result.isFinal else { continue }
+                let plain = String(result.text.characters)
+                let start = result.text.runs
+                    .compactMap { $0.audioTimeRange?.start.seconds }
+                    .min()
+                out.append(TranscriptUpdate(text: plain, isFinal: true, startTime: start))
+            }
+            return out
+        }
+
+        try await analyzer.start(inputSequence: inputStream)
+
+        // 整檔分批讀取 → 轉成 analyzer 偏好格式 → 餵入
+        let converter: AVAudioConverter? = {
+            if let target = analyzerFormat, target != fileFormat {
+                return AVAudioConverter(from: fileFormat, to: target)
+            }
+            return nil
+        }()
+        let frameCount: AVAudioFrameCount = 8192
+        while true {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else { break }
+            try audioFile.read(into: buffer)
+            if buffer.frameLength == 0 { break } // EOF
+            if let converter, let target = analyzerFormat,
+               let output = convert(buffer, using: converter, to: target) {
+                continuation.yield(AnalyzerInput(buffer: output))
+            } else {
+                continuation.yield(AnalyzerInput(buffer: buffer))
+            }
+        }
+        continuation.finish()
+
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        let updates = try await collector.value
+        self.analyzer = nil
+        self.transcriber = nil
+        self.inputContinuation = nil
+        return updates
+    }
+
     // MARK: - Private
 
     /// 解析出裝置實際支援、與要求語系最相符的 Locale。

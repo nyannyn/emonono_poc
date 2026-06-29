@@ -44,6 +44,21 @@ public class ExpoSpeechAnalyzerModule: Module {
             await self.stopAnalyzer()
         }
 
+        // 一次性轉譯整個音檔（整段錄音的原生路線）。每次建新 transcriber，與即時 mic 引擎互不干擾。
+        AsyncFunction("transcribeFile") { (uri: String, locale: String) async throws -> [[String: Any]] in
+            guard #available(iOS 26.0, *) else {
+                throw TranscriptionError.engineUnavailable
+            }
+            guard let url = URL(string: uri) else {
+                throw TranscriptionError.engineUnavailable
+            }
+            let transcriber = SpeechAnalyzerTranscriber(locale: Locale(identifier: locale))
+            let updates = try await transcriber.transcribeFile(url: url)
+            return updates.map { u in
+                ["text": u.text, "isFinal": u.isFinal, "startTime": u.startTime as Any]
+            }
+        }
+
         OnDestroy {
             self.consumeTask?.cancel()
         }

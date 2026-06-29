@@ -56,6 +56,7 @@ function safeSize(uri: string): number {
 export async function splitWavIfNeeded(
   uri: string,
   maxBytes = 24 * 1024 * 1024,
+  targetChunkBytes = TARGET_CHUNK_BYTES,
 ): Promise<WavChunk[]> {
   const totalSize = safeSize(uri);
   if (totalSize === 0 || totalSize <= maxBytes) {
@@ -75,7 +76,7 @@ export async function splitWavIfNeeded(
     if (!tmpDir.exists) tmpDir.create({ intermediates: true });
 
     // 對齊 16-bit mono = 2 bytes / sample；確保切點不切在 sample 中間
-    const chunkBodyMax = Math.max(2, Math.floor((TARGET_CHUNK_BYTES - header.length) / 2) * 2);
+    const chunkBodyMax = Math.max(2, Math.floor((targetChunkBytes - header.length) / 2) * 2);
     const totalChunks = Math.ceil(dataLen / chunkBodyMax);
     const chunks: WavChunk[] = [];
     const ts = Date.now();
