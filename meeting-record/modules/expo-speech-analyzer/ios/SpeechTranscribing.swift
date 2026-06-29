@@ -24,6 +24,7 @@ enum TranscriptionError: Error, LocalizedError {
     case localeNotSupported(String)
     case engineUnavailable
     case assetInstallationFailed
+    case fileTranscriptionFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -31,6 +32,7 @@ enum TranscriptionError: Error, LocalizedError {
         case .localeNotSupported(let id): return "不支援的語系：\(id)"
         case .engineUnavailable: return "語音辨識引擎不可用"
         case .assetInstallationFailed: return "語系模型下載失敗"
+        case .fileTranscriptionFailed(let msg): return "原生檔案轉譯失敗：\(msg)"
         }
     }
 }

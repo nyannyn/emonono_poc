@@ -115,8 +115,16 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
     /// 一次性轉譯整個音檔（非即時，給「整段錄音」原生路線用）。
     /// 刻意重用即時路徑驗證過的 `analyzer.start(inputSequence:)` + `transcriber.results` + `convert`，
     /// 只把 buffer 來源從麥克風 tap 換成讀 `AVAudioFile`（無需 AVAudioSession / 麥克風）。
-    /// ⚠️ 尚未在 iOS 26 dev build 實機驗證（CP3 staged）。
+    /// 每階段包上具體錯誤訊息，避免只丟出無資訊的 ObjC error 0。
     func transcribeFile(url: URL) async throws -> [TranscriptUpdate] {
+        // 0. 語音辨識授權（檔案轉譯也需要；不需麥克風）。Live 路徑由 hook 先 requestPermissions，
+        //    本路徑由 RecordingView 直接呼叫、沒先要權限 → 這裡自帶，否則 Speech 框架會丟 error 0。
+        let speechStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+            SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
+        }
+        guard speechStatus == .authorized else { throw TranscriptionError.notAuthorized }
+
+        // 1. 解析語系（不支援會丟帶語系名的清楚錯誤）
         let resolvedLocale = try await resolveSupportedLocale()
 
         let transcriber = SpeechTranscriber(
@@ -126,20 +134,39 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
             attributeOptions: [.audioTimeRange]
         )
         self.transcriber = transcriber
-        try await ensureModelInstalled(for: transcriber, locale: resolvedLocale)
+
+        // 2. 確認語系模型已安裝（首次可能需下載）
+        do {
+            try await ensureModelInstalled(for: transcriber, locale: resolvedLocale)
+        } catch {
+            throw TranscriptionError.fileTranscriptionFailed("語系模型準備失敗（\(resolvedLocale.identifier)）：\(error.localizedDescription)")
+        }
 
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         self.analyzer = analyzer
-
         let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
 
-        let audioFile = try AVAudioFile(forReading: url)
+        // 3. 開檔
+        let audioFile: AVAudioFile
+        do {
+            audioFile = try AVAudioFile(forReading: url)
+        } catch {
+            throw TranscriptionError.fileTranscriptionFailed("開啟音檔失敗（\(url.lastPathComponent)）：\(error.localizedDescription)")
+        }
         let fileFormat = audioFile.processingFormat
 
         let (inputStream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
         self.inputContinuation = continuation
 
-        // 收集定稿結果（含逐句時間範圍 → startTime）
+        // 4. 啟動分析器
+        do {
+            try await analyzer.start(inputSequence: inputStream)
+        } catch {
+            continuation.finish()
+            throw TranscriptionError.fileTranscriptionFailed("分析器啟動失敗：\(error.localizedDescription)")
+        }
+
+        // 5. 收集定稿結果（含逐句時間範圍 → startTime）
         let collector = Task { () -> [TranscriptUpdate] in
             var out: [TranscriptUpdate] = []
             for try await result in transcriber.results {
@@ -153,9 +180,7 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
             return out
         }
 
-        try await analyzer.start(inputSequence: inputStream)
-
-        // 整檔分批讀取 → 轉成 analyzer 偏好格式 → 餵入
+        // 6. 整檔分批讀取 → 轉成 analyzer 偏好格式 → 餵入
         let converter: AVAudioConverter? = {
             if let target = analyzerFormat, target != fileFormat {
                 return AVAudioConverter(from: fileFormat, to: target)
@@ -163,20 +188,31 @@ final class SpeechAnalyzerTranscriber: SpeechTranscribing {
             return nil
         }()
         let frameCount: AVAudioFrameCount = 8192
-        while true {
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else { break }
-            try audioFile.read(into: buffer)
-            if buffer.frameLength == 0 { break } // EOF
-            if let converter, let target = analyzerFormat,
-               let output = convert(buffer, using: converter, to: target) {
-                continuation.yield(AnalyzerInput(buffer: output))
-            } else {
-                continuation.yield(AnalyzerInput(buffer: buffer))
+        do {
+            while true {
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else { break }
+                try audioFile.read(into: buffer)
+                if buffer.frameLength == 0 { break } // EOF
+                if let converter, let target = analyzerFormat,
+                   let output = convert(buffer, using: converter, to: target) {
+                    continuation.yield(AnalyzerInput(buffer: output))
+                } else {
+                    continuation.yield(AnalyzerInput(buffer: buffer))
+                }
             }
+        } catch {
+            continuation.finish()
+            collector.cancel()
+            throw TranscriptionError.fileTranscriptionFailed("讀取音檔失敗：\(error.localizedDescription)")
         }
         continuation.finish()
 
-        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        // 7. 收尾，等結果收齊
+        do {
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+        } catch {
+            throw TranscriptionError.fileTranscriptionFailed("收尾失敗：\(error.localizedDescription)")
+        }
         let updates = try await collector.value
         self.analyzer = nil
         self.transcriber = nil
