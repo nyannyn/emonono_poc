@@ -3,6 +3,8 @@
 // 模型若為 gpt-4o-transcribe-diarize，會自動把 [speaker_*] 標籤嵌入文字
 
 import { File } from 'expo-file-system';
+import { uploadAsync, FileSystemUploadType } from 'expo-file-system/legacy';
+import { Audio } from 'expo-av';
 import { KeySource, Mode } from '../storage/settings';
 import { cleanupChunks, splitWavIfNeeded } from '../audio/wavChunker';
 import { autoMapSpeakers, prependVoiceprints } from '../audio/voiceprintMix';
@@ -18,6 +20,11 @@ const CHAT_TIMEOUT_MS = 120000; // 2 分鐘
 // 走 Gemini 原生 generateContent + inline_data base64（非 OpenAI 相容端點，才能設 thinkingBudget）。
 const GEMINI_DIARIZE_MODEL = 'gemini-2.5-flash'; // 免費層唯一可用；2.0-flash 免費額度=0
 const GEMINI_CHUNK_MAX = 12 * 1024 * 1024;       // 每段 ≤12MB WAV → base64 <20MB inline 上限；切段亦避免長檔崩潰
+// 非 WAV（如 iPhone 語音備忘錄 m4a）走 File API：裝置端無 ffmpeg 不能實體切段，
+// 改成「整檔上傳一次 → 依時間窗多次請求」。單次塞長檔會在 ~27 分卡迴圈丟內容，故分窗。
+const GEMINI_FILE_WINDOW_SEC = 12 * 60;          // 每窗 12 分鐘（CP1b 驗過 12 分穩定）
+const GEMINI_WINDOW_TIMEOUT_MS = 540000;         // 單窗最長 9 分鐘（實測長音訊窗最久 ~6 分鐘）
+const GEMINI_MAX_WINDOWS = 30;                   // 安全上限（~6 小時），避免取不到長度時無限請求
 const GEMINI_DIARIZE_PROMPT = `請把這段會議錄音整理成「帶講者標註的逐字稿」（speaker diarization）。
 要求：
 1. 全程使用繁體中文輸出。
@@ -217,39 +224,127 @@ export class LLMClient {
     return m ? m[1] : 'https://generativelanguage.googleapis.com';
   }
 
-  /** 單段音檔（base64 WAV）→ Gemini 帶 `Speaker N:` 標籤的原始逐字稿文字。 */
-  private async geminiDiarizeInline(base64Audio: string): Promise<string> {
+  private geminiHeaders(): Record<string, string> {
+    return { 'x-goog-api-key': this.cfg.llmApiKey ?? '' };
+  }
+
+  /** Gemini generateContent POST + 免費層 429 退避重試。res.ok 時原樣回傳（呼叫端負責讀 body）。 */
+  private async geminiGenerate(body: unknown, timeoutMs: number, maxAttempts = 3): Promise<Response> {
     const url = `${this.geminiOrigin()}/v1beta/models/${GEMINI_DIARIZE_MODEL}:generateContent`;
-    const res = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': this.cfg.llmApiKey ?? '',
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: 'audio/wav', data: base64Audio } },
-            { text: GEMINI_DIARIZE_PROMPT },
-          ],
-        }],
-        generationConfig: {
-          maxOutputTokens: 32768,
-          temperature: 0,
-          thinkingConfig: { thinkingBudget: 0 }, // 必設：thinking 開會回空字串/重複迴圈（CP1 實證）
-        },
-      }),
-    }, STT_TIMEOUT_MS);
-    if (!res.ok) throw new Error(`Gemini STT ${res.status}: ${await res.text()}`);
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...this.geminiHeaders() },
+        body: JSON.stringify(body),
+      }, timeoutMs);
+      if (res.ok) return res;
+      const errText = await res.text();
+      if (res.status === 429 && attempt < maxAttempts) {
+        const m = errText.match(/retry in ([\d.]+)s/i);
+        const waitMs = Math.min(60000, m ? Math.ceil(parseFloat(m[1]) + 2) * 1000 : 30000);
+        await sleep(waitMs);
+        continue;
+      }
+      throw new Error(`Gemini STT ${res.status}: ${errText}`);
+    }
+  }
+
+  private async geminiTextFrom(res: Response): Promise<string> {
     const data = await parseJsonSafe(res, 'Gemini 回應');
     const parts = data?.candidates?.[0]?.content?.parts ?? [];
     return parts.map((p: any) => p?.text ?? '').join('').trim();
   }
 
+  /** 單段音檔（base64）→ Gemini 帶 `Speaker N:` 標籤的原始逐字稿文字（WAV inline 路徑用）。 */
+  private async geminiDiarizeInline(base64Audio: string, mimeType = 'audio/wav'): Promise<string> {
+    const res = await this.geminiGenerate({
+      contents: [{ parts: [
+        { inline_data: { mime_type: mimeType, data: base64Audio } },
+        { text: GEMINI_DIARIZE_PROMPT },
+      ] }],
+      generationConfig: {
+        maxOutputTokens: 32768,
+        temperature: 0,
+        thinkingConfig: { thinkingBudget: 0 }, // 必設：thinking 開會回空字串/重複迴圈（CP1 實證）
+      },
+    }, STT_TIMEOUT_MS);
+    return this.geminiTextFrom(res);
+  }
+
+  /** 上傳音檔到 Gemini File API（resumable，邊讀邊傳不爆記憶體）→ 等到 ACTIVE，回 { name, uri }。 */
+  private async geminiUploadFile(fileUri: string, mimeType: string, numBytes: number): Promise<{ name: string; uri: string }> {
+    const origin = this.geminiOrigin();
+    // 1) 起始 resumable session，從回應 header 取上傳 URL
+    const start = await fetchWithTimeout(`${origin}/upload/v1beta/files`, {
+      method: 'POST',
+      headers: {
+        ...this.geminiHeaders(),
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(numBytes),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { display_name: 'meeting-audio' } }),
+    }, STT_TIMEOUT_MS);
+    if (!start.ok) throw new Error(`Gemini File 上傳起始失敗 ${start.status}: ${await start.text()}`);
+    const uploadUrl = start.headers.get('x-goog-upload-url');
+    if (!uploadUrl) throw new Error('Gemini File API 未回傳上傳 URL');
+
+    // 2) 上傳檔案 bytes + finalize（legacy uploadAsync 直接把檔案串流成 request body）
+    const up = await uploadAsync(uploadUrl, fileUri, {
+      uploadType: FileSystemUploadType.BINARY_CONTENT,
+      headers: { 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' },
+    });
+    if (up.status < 200 || up.status >= 300) throw new Error(`Gemini File 上傳失敗 ${up.status}: ${(up.body ?? '').slice(0, 200)}`);
+    let meta: any;
+    try { meta = JSON.parse(up.body); } catch { throw new Error(`Gemini File 上傳回應非 JSON：${(up.body ?? '').slice(0, 200)}`); }
+    const file = meta?.file ?? meta;
+    const name: string = file?.name;
+    let uri: string = file?.uri;
+    let state: string = file?.state;
+    if (!name || !uri) throw new Error('Gemini File 上傳回應缺 name/uri');
+
+    // 3) audio 需伺服器處理：輪詢到 ACTIVE
+    const deadline = Date.now() + STT_TIMEOUT_MS;
+    while (state === 'PROCESSING') {
+      if (Date.now() > deadline) throw new Error('Gemini File 處理逾時');
+      await sleep(2000);
+      const g = await fetchWithTimeout(`${origin}/v1beta/${name}`, { headers: this.geminiHeaders() }, CHAT_TIMEOUT_MS);
+      if (!g.ok) throw new Error(`Gemini File 狀態查詢失敗 ${g.status}`);
+      const gd = await parseJsonSafe(g, 'Gemini File 狀態');
+      state = gd?.state;
+      if (gd?.uri) uri = gd.uri;
+    }
+    if (state !== 'ACTIVE') throw new Error(`Gemini File 處理失敗（state=${state ?? '未知'}）`);
+    return { name, uri };
+  }
+
+  private async geminiDeleteFile(name: string): Promise<void> {
+    await fetchWithTimeout(`${this.geminiOrigin()}/v1beta/${name}`, { method: 'DELETE', headers: this.geminiHeaders() }, CHAT_TIMEOUT_MS);
+  }
+
+  /** 對「已上傳的 File」只轉錄某時間窗（lo~hi 秒）。模型看得到整段 → 要求講者編號全段一致。 */
+  private async geminiDiarizeWindow(fileRefUri: string, mimeType: string, loSec: number, hiSec: number, durSec: number): Promise<string> {
+    const scope = `\n\n（這是一段較長錄音${durSec > 0 ? `，總長約 ${Math.round(durSec / 60)} 分鐘` : ''}。）請「只」輸出從 ${fmtClock(loSec)} 到 ${fmtClock(hiSec)} 這個時間區間的逐字稿，其餘時間忽略不要輸出。但講者編號要以「整段錄音」為準：同一個人不論在哪個區間都用同一個 Speaker 編號。每段講者標籤後、文字前加上該段在整段錄音中的絕對時間，格式 [MM:SS]。只輸出此區間逐字稿，不要任何前言或說明。`;
+    const res = await this.geminiGenerate({
+      contents: [{ parts: [
+        { file_data: { mime_type: mimeType, file_uri: fileRefUri } },
+        { text: GEMINI_DIARIZE_PROMPT + scope },
+      ] }],
+      generationConfig: {
+        maxOutputTokens: 32768,
+        temperature: 0,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    }, GEMINI_WINDOW_TIMEOUT_MS);
+    return this.geminiTextFrom(res);
+  }
+
   /**
-   * Gemini 分講者轉錄（CP1 驗證流程）：切 ≤12MB WAV 段 → 每段拼聲紋 → inline 轉錄
-   * → 正規化 [speaker_N] → autoMapSpeakers 反推姓名（跨段以姓名一致）→ 重複迴圈過濾 → 串接。
-   * 僅支援 app 內錄的 WAV（裝置端無 ffmpeg，無法切段非 WAV 長檔）。
+   * Gemini 分講者轉錄。
+   * - WAV（app 內錄）：切 ≤12MB 段 → 每段拼聲紋 inline 轉錄 → autoMap 反推姓名（CP1 驗證流程）。
+   * - 非 WAV（如 iPhone 語音備忘錄 m4a，裝置端無 ffmpeg 不能切段）：見 transcribeNonWavViaFileApi。
    */
   async transcribeWithGeminiDiarized(
     fileUri: string,
@@ -257,11 +352,7 @@ export class LLMClient {
     opts: { onProgress?: (done: number, total: number) => void } = {},
   ): Promise<string> {
     if (!fileUri.toLowerCase().endsWith('.wav')) {
-      let size = 0;
-      try { size = new File(fileUri).size ?? 0; } catch { /* 取不到當小檔 */ }
-      if (size > GEMINI_CHUNK_MAX) {
-        throw new Error('Gemini 分講者目前只支援 app 內錄的 WAV（裝置端無法切段非 WAV 長檔）。請改用 app 內錄音，或改用 OpenAI 分講者。');
-      }
+      return this.transcribeNonWavViaFileApi(fileUri, opts);
     }
 
     const chunks = await splitWavIfNeeded(fileUri, GEMINI_CHUNK_MAX, GEMINI_CHUNK_MAX);
@@ -289,6 +380,46 @@ export class LLMClient {
       cleanupChunks(chunks, fileUri);
     }
     opts.onProgress?.(chunks.length, chunks.length);
+    return outParts.filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * 非 WAV（m4a 等）：上傳 File API 一次 → 依音檔長度切 12 分鐘時間窗逐窗轉錄 → 串接。
+   * 裝置端無 ffmpeg 不能實體切段，改用「同一上傳、多窗請求」；每窗都把整段當 context，
+   * 故可要求講者編號全段一致（實體切段做不到）。長度取不到時逐窗試到空窗為止。
+   */
+  private async transcribeNonWavViaFileApi(
+    fileUri: string,
+    opts: { onProgress?: (done: number, total: number) => void },
+  ): Promise<string> {
+    let numBytes = 0;
+    try { numBytes = new File(fileUri).size ?? 0; } catch { /* 取不到讓伺服器決定 */ }
+    const mime = geminiAudioMime(fileUri);
+    const durSec = await audioDurationSec(fileUri);
+    const totalWindows = durSec > 0
+      ? Math.min(GEMINI_MAX_WINDOWS, Math.max(1, Math.ceil(durSec / GEMINI_FILE_WINDOW_SEC)))
+      : GEMINI_MAX_WINDOWS;
+
+    const { name, uri } = await this.geminiUploadFile(fileUri, mime, numBytes);
+    const outParts: string[] = [];
+    let done = 0;
+    try {
+      for (let i = 0; i < totalWindows; i++) {
+        opts.onProgress?.(i, durSec > 0 ? totalWindows : i + 1);
+        const lo = i * GEMINI_FILE_WINDOW_SEC;
+        const hi = (i + 1) * GEMINI_FILE_WINDOW_SEC;
+        let raw = await this.geminiDiarizeWindow(uri, mime, lo, hi, durSec);
+        raw = collapseRepeats(raw);
+        const text = formatTranscript({ text: raw }).trim();
+        done = i + 1;
+        // 長度未知時：非首窗的空窗代表已過結尾 → 收工（首窗不 break，避免偶發空回應整段失敗）
+        if (durSec === 0 && i > 0 && stripForEmptyCheck(text).length < 4) break;
+        if (text) outParts.push(text);
+      }
+    } finally {
+      try { await this.geminiDeleteFile(name); } catch { /* 清不掉 48h 後自動過期 */ }
+    }
+    opts.onProgress?.(durSec > 0 ? totalWindows : done, durSec > 0 ? totalWindows : done);
     return outParts.filter(Boolean).join('\n\n');
   }
 
@@ -336,6 +467,51 @@ export interface TokenUsage {
   output: number;
   total: number;
   elapsedMs: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 副檔名 → Gemini 接受的 audio mime。m4a/mp4 走 audio/mp4（File API 實測可吃）。 */
+function geminiAudioMime(uri: string): string {
+  const ext = uri.toLowerCase().split('.').pop() ?? '';
+  switch (ext) {
+    case 'wav': return 'audio/wav';
+    case 'mp3': return 'audio/mp3';
+    case 'aac': return 'audio/aac';
+    case 'flac': return 'audio/flac';
+    case 'ogg': return 'audio/ogg';
+    case 'aiff': case 'aif': return 'audio/aiff';
+    default: return 'audio/mp4'; // m4a / mp4 / m4b / 未知 → 當 mp4 容器
+  }
+}
+
+/** 秒 → "M:SS"（分鐘可超過 59，例如 720→"12:00"、3600→"60:00"；Gemini 實測能解讀）。 */
+function fmtClock(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = Math.floor(totalSec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/** 去掉講者/時間標籤與空白，用來判斷一個窗是不是「空的」（已過錄音結尾）。 */
+function stripForEmptyCheck(t: string): string {
+  return t
+    .replace(/\[speaker_\w+\]/gi, '')
+    .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]/g, '')
+    .replace(/\s+/g, '');
+}
+
+/** 讀音檔長度（秒，無條件進位）。取不到回 0（呼叫端改用「逐窗試到空」）。 */
+async function audioDurationSec(uri: string): Promise<number> {
+  try {
+    const { sound, status } = await Audio.Sound.createAsync({ uri }, { shouldPlay: false }, null, true);
+    const ms = status.isLoaded ? (status.durationMillis ?? 0) : 0;
+    await sound.unloadAsync();
+    return ms > 0 ? Math.ceil(ms / 1000) : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** Whisper / diarize 回應 → 統一文字格式，speaker 標籤都正規化成 [speaker_N]。 */
