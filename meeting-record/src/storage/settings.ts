@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: Settings = {
   username: '',
   password: '',
   llmApiKey: '',
-  model: 'gemini-2.0-flash',
+  model: 'gemini-2.5-flash', // gemini-2.0-flash 免費層額度=0，預設用免費層唯一可用的 2.5-flash
   liveSttSource: 'device',
   recordSttSource: 'device',
   language: 'zh',
@@ -102,6 +102,10 @@ export async function loadSettings(): Promise<Settings> {
   // 打到空的 base URL → Network request failed。
   if (!HAS_MANAGED_PROXY && s.keySource === 'managed') {
     s = { ...s, keySource: 'own' };
+  }
+  // gemini-2.0-flash 免費層額度=0（見 client.ts），舊存檔沿用會 404；遷移到免費層唯一可用的 2.5-flash。
+  if (s.model === 'gemini-2.0-flash') {
+    s = { ...s, model: 'gemini-2.5-flash' };
   }
   return s;
 }

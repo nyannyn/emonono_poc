@@ -10,7 +10,7 @@ import { cleanupChunks, splitWavIfNeeded } from '../audio/wavChunker';
 import { autoMapSpeakers, prependVoiceprints } from '../audio/voiceprintMix';
 import { Member } from '../storage/db';
 import { MANAGED_PROXY_TOKEN, MANAGED_PROXY_URL } from '../config/features';
-import { fetchWithTimeout, parseJsonSafe } from './http';
+import { fetchWithTimeout, httpError, parseJsonSafe } from './http';
 
 // 各類請求逾時：STT 上傳較久、chat 中等
 const STT_TIMEOUT_MS = 300000; // 5 分鐘（大檔上傳 + 轉譯）
@@ -115,7 +115,7 @@ export class LLMClient {
       auth: this.cfg.llmApiKey
         ? `Bearer ${this.cfg.llmApiKey}`
         : `Basic ${btoa(`${this.cfg.username ?? ''}:${this.cfg.password ?? ''}`)}`,
-      model: this.cfg.model || 'gemini-2.0-flash',
+      model: this.cfg.model || 'gemini-2.5-flash',
     };
   }
 
@@ -443,7 +443,14 @@ export class LLMClient {
         max_tokens: 4000,
       }),
     }, CHAT_TIMEOUT_MS);
-    if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`);
+    if (!res.ok)
+      throw await httpError(res, {
+        label: 'LLM',
+        url: ep.url,
+        model: ep.model,
+        mode: this.cfg.mode,
+        keySource: this.cfg.keySource,
+      });
     const data = await parseJsonSafe(res, 'LLM 回應');
     const u = data?.usage ?? {};
     const input = u.prompt_tokens ?? u.input_tokens ?? 0;
